@@ -130,7 +130,8 @@ class AutomationModule(ABC):
     Legacy Module above remains available until its consumers are migrated.
     """
 
-    def __init__(self, memory: MemoryReader, offsets: OffsetRegistry, name: str, *,
+    def __init__(self, memory: MemoryReader = None, offsets: OffsetRegistry = None, name: str = "automation", *,
+                 bus: Any = None,
                  interval: float = 0.1, enabled: bool = True,
                  autostart: bool = False, max_errors: int = 10) -> None:
         if type(max_errors) is not int or max_errors < 0:
@@ -138,6 +139,11 @@ class AutomationModule(ABC):
         self.memory = memory
         self.offsets = offsets
         self.name = name
+        try:
+            from inputbus import get_bus
+            self.bus = bus if bus is not None else get_bus()
+        except Exception:
+            self.bus = bus
         self.log = logging.getLogger(f"pokebot.modules.{name}")
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
@@ -309,13 +315,42 @@ class AutomationModule(ABC):
                 self.log.info("module stopped (ticks=%d, errors=%d)", self._ticks, self._error_count)
 
     def read(self, key: str) -> Optional[Any]:
-        return self.offsets.read(self.memory, key)
+        if self.offsets is not None and hasattr(self.offsets, "read"):
+            return self.offsets.read(self.memory, key)
+        if self.offsets is not None and hasattr(self.offsets, "read_entry"):
+            return self.offsets.read_entry(key)
+        if hasattr(self, "resolver") and self.resolver is not None and hasattr(self.resolver, "read_entry"):
+            return self.resolver.read_entry(key)
+        if self.memory is not None and hasattr(self.memory, "read_entry"):
+            return self.memory.read_entry(key)
+        return None
 
     def write(self, key: str, value: Any) -> bool:
-        return self.offsets.write(self.memory, key, value)
+        if self.offsets is not None and hasattr(self.offsets, "write"):
+            return self.offsets.write(self.memory, key, value)
+        return False
 
     def entry(self, key: str) -> Optional[OffsetEntry]:
-        return self.offsets.find(key)
+        if self.offsets is not None and hasattr(self.offsets, "find"):
+            return self.offsets.find(key)
+        if self.offsets is not None and hasattr(self.offsets, "entries"):
+            return self.offsets.entries.get(key)
+        return None
+
+    def key_down(self, vk: int, priority: int = 10) -> bool:
+        if self.bus and hasattr(self.bus, "key_down"):
+            return self.bus.key_down(vk, priority, module=self.name)
+        return False
+
+    def key_up(self, vk: int, priority: int = 10) -> bool:
+        if self.bus and hasattr(self.bus, "key_up"):
+            return self.bus.key_up(vk, priority, module=self.name)
+        return False
+
+    def press(self, vk: int, hold_ms: int = 50, priority: int = 10) -> bool:
+        if self.bus and hasattr(self.bus, "press_key"):
+            return self.bus.press_key(vk, hold_ms, priority, module=self.name)
+        return False
 
     def setup(self) -> None:
         """Optional initialization on the worker, once per start."""

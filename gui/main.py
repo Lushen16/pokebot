@@ -189,6 +189,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.worker_thread = None
         self.resolver = None
+        self.wp_table = None
 
         self.setWindowTitle("PKA Bot — PokeAlliance Assistant")
         self.setMinimumSize(1200, 800)
@@ -389,84 +390,9 @@ class MainWindow(QMainWindow):
         return w
 
     def _create_cavebot_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-
-        # Controls
-        ctrl_group = QGroupBox("Waypoint Controls")
-        c_layout = QHBoxLayout(ctrl_group)
-        self.btn_add_wp = QPushButton("➕ Add Current Position")
-        self.btn_add_wp.clicked.connect(self._add_waypoint)
-        self.btn_remove_wp = QPushButton("➖ Remove Selected")
-        self.btn_remove_wp.clicked.connect(self._remove_waypoint)
-        self.btn_clear_wp = QPushButton("🗑️ Clear All")
-        self.btn_clear_wp.clicked.connect(self._clear_waypoints)
-        self.btn_load_wp = QPushButton("📂 Load")
-        self.btn_load_wp.clicked.connect(self._load_waypoints)
-        self.btn_save_wp = QPushButton("💾 Save")
-        self.btn_save_wp.clicked.connect(self._save_waypoints)
-        c_layout.addWidget(self.btn_add_wp)
-        c_layout.addWidget(self.btn_remove_wp)
-        c_layout.addWidget(self.btn_clear_wp)
-        c_layout.addStretch()
-        c_layout.addWidget(self.btn_load_wp)
-        c_layout.addWidget(self.btn_save_wp)
-        layout.addWidget(ctrl_group)
-
-        # Waypoint list
-        list_group = QGroupBox("Waypoints")
-        lg_layout = QVBoxLayout(list_group)
-        self.wp_table = QTableWidget()
-        self.wp_table.setColumnCount(6)
-        self.wp_table.setHorizontalHeaderLabels(["#", "Name", "X", "Y", "Z", "Action"])
-        self.wp_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.wp_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.wp_table.setAlternatingRowColors(True)
-        lg_layout.addWidget(self.wp_table)
-        layout.addWidget(list_group)
-
-        # Cavebot settings
-        settings_group = QGroupBox("Cavebot Settings")
-        sg_layout = QFormLayout(settings_group)
-        self.spin_arrive_tol = QSpinBox()
-        self.spin_arrive_tol.setRange(0, 10)
-        self.spin_arrive_tol.setValue(self.ctx.get("cavebot", "arrive_tolerance_tiles", default=1))
-        self.spin_arrive_tol.valueChanged.connect(lambda v: self.ctx.set(v, "cavebot", "arrive_tolerance_tiles"))
-        sg_layout.addRow("Arrive Tolerance (tiles):", self.spin_arrive_tol)
-
-        self.spin_key_hold = QSpinBox()
-        self.spin_key_hold.setRange(20, 500)
-        self.spin_key_hold.setValue(self.ctx.get("cavebot", "key_hold_ms", default=90))
-        self.spin_key_hold.valueChanged.connect(lambda v: self.ctx.set(v, "cavebot", "key_hold_ms"))
-        sg_layout.addRow("Key Hold (ms):", self.spin_key_hold)
-
-        self.spin_max_leg = QSpinBox()
-        self.spin_max_leg.setRange(1, 60)
-        self.spin_max_leg.setValue(self.ctx.get("cavebot", "max_seconds_per_leg", default=6))
-        self.spin_max_leg.valueChanged.connect(lambda v: self.ctx.set(v, "cavebot", "max_seconds_per_leg"))
-        sg_layout.addRow("Max Seconds/Leg:", self.spin_max_leg)
-
-        self.spin_stuck_retry = QSpinBox()
-        self.spin_stuck_retry.setRange(0, 10)
-        self.spin_stuck_retry.setValue(self.ctx.get("cavebot", "stuck_retry_count", default=3))
-        self.spin_stuck_retry.valueChanged.connect(lambda v: self.ctx.set(v, "cavebot", "stuck_retry_count"))
-        sg_layout.addRow("Stuck Retry Count:", self.spin_stuck_retry)
-
-        self.spin_stuck_thresh = QSpinBox()
-        self.spin_stuck_thresh.setRange(500, 10000)
-        self.spin_stuck_thresh.setSingleStep(100)
-        self.spin_stuck_thresh.setValue(self.ctx.get("cavebot", "stuck_threshold_ms", default=1500))
-        self.spin_stuck_thresh.valueChanged.connect(lambda v: self.ctx.set(v, "cavebot", "stuck_threshold_ms"))
-        sg_layout.addRow("Stuck Threshold (ms):", self.spin_stuck_thresh)
-
-        self.spin_pause_creature = QSpinBox()
-        self.spin_pause_creature.setRange(0, 10)
-        self.spin_pause_creature.setValue(self.ctx.get("cavebot", "pause_on_creature_within_tiles", default=2))
-        self.spin_pause_creature.valueChanged.connect(lambda v: self.ctx.set(v, "cavebot", "pause_on_creature_within_tiles"))
-        sg_layout.addRow("Pause if Creature Within (tiles):", self.spin_pause_creature)
-
-        layout.addWidget(settings_group)
-        return w
+        from ui.cavebot_tab import CavebotTab
+        walker = getattr(self.engine, "walker", None) if self.engine else None
+        return CavebotTab(walker=walker)
 
     def _create_targeting_tab(self) -> QWidget:
         w = QWidget()
@@ -870,6 +796,8 @@ class MainWindow(QMainWindow):
         self._log("INFO", "Add waypoint at current position (requires resolver)")
 
     def _remove_waypoint(self):
+        if not hasattr(self, "wp_table") or self.wp_table is None:
+            return
         row = self.wp_table.currentRow()
         if row >= 0 and self.engine and self.engine.navigator:
             self.engine.navigator.remove_waypoint(row)
@@ -893,6 +821,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_waypoint_table(self):
         if not self.engine or not self.engine.navigator:
+            return
+        if not hasattr(self, "wp_table") or self.wp_table is None:
             return
         wps = self.engine.navigator.waypoints
         self.wp_table.setRowCount(len(wps))
@@ -918,6 +848,8 @@ class MainWindow(QMainWindow):
             target = target_pid if target_pid else proc_name
             self.resolver = connect_live_resolver(target, config_path=self.config_path)
             self.engine = create_engine(config_path=self.config_path, resolver=self.resolver)
+            if hasattr(self, "tab_cavebot") and hasattr(self.tab_cavebot, "set_walker") and hasattr(self.engine, "walker"):
+                self.tab_cavebot.set_walker(self.engine.walker)
         except Exception as exc:
             if self.resolver:
                 self.resolver.proc.detach()
