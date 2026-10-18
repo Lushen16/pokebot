@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 import logging
+import os
 import queue
 import threading
 import time
@@ -13,6 +14,7 @@ from typing import Callable, Optional
 import win32api
 import win32con
 import win32gui
+import win32process
 
 from context import get_context
 from wininput import send_scancode, vk_to_scancode, send_mouse_button, sendinput_selftest
@@ -24,6 +26,7 @@ class InputType(Enum):
     KEY_DOWN = "key_down"
     KEY_UP = "key_up"
     KEY_PRESS = "key_press"  # down + up with delay
+    KEY_COMBO = "key_combo"  # modifier(s) + key with hold time
     MOUSE_CLICK = "mouse_click"
     MOUSE_MOVE = "mouse_move"
 
@@ -33,6 +36,8 @@ class InputRequest:
     type: InputType
     # key press: vk or scancode
     code: int = 0
+    # key combo: multiple vks or scancodes in sequence
+    codes: tuple[int, ...] = ()
     # mouse: x, y (client-relative)
     x: int = 0
     y: int = 0
@@ -44,6 +49,7 @@ class InputRequest:
     callback: Optional[Callable[[], None]] = None
     # module name for debugging
     module: str = "unknown"
+    button: str = "left"
 
 
 class InputBus:
@@ -62,6 +68,7 @@ class InputBus:
         self._last_input_time = 0.0
         self._hwnd = None
         self._hwnd_lock = threading.Lock()
+        self._focus_blocked = False
 
     def start(self):
         if self._running:
@@ -99,6 +106,19 @@ class InputBus:
             module=module,
         ))
 
+    def press_combo(self, codes: list[int] | tuple[int, ...], hold_ms: int = 50, priority: int = 10, module: str = "unknown") -> bool:
+        if not codes:
+            return True
+        if len(codes) == 1:
+            return self.press_key(codes[0], hold_ms=hold_ms, priority=priority, module=module)
+        return self.submit(InputRequest(
+            type=InputType.KEY_COMBO,
+            codes=tuple(codes),
+            hold_ms=hold_ms,
+            priority=priority,
+            module=module,
+        ))
+
     def key_down(self, code: int, priority: int = 10, module: str = "unknown") -> bool:
         return self.submit(InputRequest(
             type=InputType.KEY_DOWN,
@@ -115,42 +135,111 @@ class InputBus:
             module=module,
         ))
 
-    def click(self, x: int, y: int, priority: int = 10, module: str = "unknown") -> bool:
+    def click(self, x: int, y: int, priority: int = 10, module: str = "unknown",
+              *, button: str = "left") -> bool:
+        if button not in ("left", "right"):
+            raise ValueError("Mouse button must be left or right")
         return self.submit(InputRequest(
             type=InputType.MOUSE_CLICK,
             x=x,
             y=y,
+            button=button,
             priority=priority,
             module=module,
         ))
 
+    def _matches_client(self, hwnd):
+        if not hwnd or not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
+            return False
+        _, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
+        if owner_pid == os.getpid():
+            return False
+        target_pid = self._ctx.get("client", "target_pid", default=None)
+        if target_pid is not None and owner_pid != int(target_pid):
+            return False
+
+        # Ignorar janelas filhas
+        try:
+            parent = win32gui.GetParent(hwnd)
+            if isinstance(parent, int) and parent != 0:
+                return False
+        except Exception:
+            pass
+
+        # Ignorar tooltips e tool windows
+        try:
+            ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            if isinstance(ex_style, int) and (ex_style & win32con.WS_EX_TOOLWINDOW):
+                return False
+        except Exception:
+            pass
+
+        # Filtrar janelas técnicas com dimensoes invalidas (ex: IME, helper)
+        try:
+            rect = win32gui.GetWindowRect(hwnd)
+            if isinstance(rect, (tuple, list)) and len(rect) >= 4:
+                w = rect[2] - rect[0]
+                h = rect[3] - rect[1]
+                if w < 160 or h < 120:
+                    return False
+        except Exception:
+            pass
+
+        if target_pid is None:
+            pattern = self._ctx.get("client", "window_title_pattern", default="PokeAlliance")
+            return pattern.lower() in win32gui.GetWindowText(hwnd).lower()
+        return True
+
     def _get_hwnd(self):
         with self._hwnd_lock:
-            if self._hwnd and win32gui.IsWindow(self._hwnd):
+            if self._matches_client(self._hwnd):
                 return self._hwnd
-            pattern = self._ctx.get("client", "window_title_pattern", default="PokeAlliance")
-            def enum_cb(hwnd, _):
-                if win32gui.IsWindowVisible(hwnd):
-                    title = win32gui.GetWindowText(hwnd)
-                    if pattern.lower() in title.lower():
-                        return hwnd
-                return None
-            result = []
-            win32gui.EnumWindows(lambda h, _: result.append(h) if enum_cb(h, _) else None, None)
-            if result:
-                self._hwnd = result[0]
+            candidates = []
+            def collect(hwnd, _):
+                if self._matches_client(hwnd):
+                    try:
+                        rect = win32gui.GetWindowRect(hwnd)
+                        if isinstance(rect, (tuple, list)) and len(rect) >= 4:
+                            area = (rect[2] - rect[0]) * (rect[3] - rect[1])
+                        else:
+                            area = 1
+                    except Exception:
+                        area = 1
+                    candidates.append((area, hwnd))
+                return True
+            win32gui.EnumWindows(collect, None)
+            if candidates:
+                # Escolhe a janela de maior area visivel (viewport principal do jogo)
+                candidates.sort(key=lambda x: x[0], reverse=True)
+                self._hwnd = candidates[0][1]
+            else:
+                self._hwnd = None
             return self._hwnd
 
     def _focus_client(self):
-        if not self._ctx.get("client", "focus_before_input", default=True):
-            return
         hwnd = self._get_hwnd()
-        if hwnd:
-            try:
-                win32gui.SetForegroundWindow(hwnd)
-                time.sleep(self._ctx.get("client", "refocus_delay_ms", default=120) / 1000.0)
-            except Exception as exc:
-                log.debug("focus failed: %s", exc)
+        if not hwnd:
+            return False
+        fg_hwnd = win32gui.GetForegroundWindow()
+        if fg_hwnd == hwnd:
+            return True
+        if not self._ctx.get("client", "focus_before_input", default=True):
+            return False
+        try:
+            # Se estiver minimizada na barra de tarefas (Iconic), restaura.
+            # Se ja estiver visivel/maximizada, usa SW_SHOW para nao desfazer
+            # a tela cheia ou maximizacao do DirectX (que causava minimizacao).
+            if win32gui.IsIconic(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            else:
+                win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            win32gui.BringWindowToTop(hwnd)
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(self._ctx.get("client", "refocus_delay_ms", default=120) / 1000.0)
+        except Exception as exc:
+            log.debug("focus failed: %s", exc)
+            return False
+        return win32gui.GetForegroundWindow() == hwnd
 
     def _send_scancode(self, scancode: int, down: bool):
         """SendInput with KEYEVENTF_SCANCODE."""
@@ -166,16 +255,31 @@ class InputBus:
         if wait > 0:
             time.sleep(wait)
 
-        self._focus_client()
-
         try:
+            if not self._focus_client():
+                if not self._focus_blocked:
+                    log.warning("Input bloqueado: janela do PID selecionado nao esta em foco. Clique no jogo para continuar.")
+                self._focus_blocked = True
+                return False
+            self._focus_blocked = False
             if req.type == InputType.KEY_PRESS:
                 sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
                 self._send_scancode(sc, True)
                 try:
-                    time.sleep(req.hold_ms / 1000.0)
+                    time.sleep(max(req.hold_ms, 80.0) / 1000.0)
                 finally:
                     self._send_scancode(sc, False)
+            elif req.type == InputType.KEY_COMBO:
+                scancodes = [c if c > 255 else self._vk_to_scancode(c) for c in req.codes]
+                for sc in scancodes:
+                    self._send_scancode(sc, True)
+                    time.sleep(0.035)
+                try:
+                    time.sleep(max(req.hold_ms, 90.0) / 1000.0)
+                finally:
+                    for sc in reversed(scancodes):
+                        self._send_scancode(sc, False)
+                        time.sleep(0.025)
             elif req.type == InputType.KEY_DOWN:
                 sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
                 self._send_scancode(sc, True)
@@ -187,14 +291,16 @@ class InputBus:
                 if hwnd:
                     # Convert client-relative to screen
                     rect = win32gui.GetClientRect(hwnd)
+                    if not rect[0] <= req.x < rect[2] or not rect[1] <= req.y < rect[3]:
+                        raise ValueError("Click outside client area")
                     client_x, client_y = win32gui.ClientToScreen(hwnd, (req.x, req.y))
                     win32api.SetCursorPos((client_x, client_y))
                     time.sleep(0.01)
-                    send_mouse_button(True)
+                    send_mouse_button(True, button=req.button)
                     try:
                         time.sleep(0.02)
                     finally:
-                        send_mouse_button(False)
+                        send_mouse_button(False, button=req.button)
             else:
                 log.warning("unknown input type: %s", req.type)
         except Exception as exc:

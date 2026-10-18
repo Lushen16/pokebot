@@ -4,6 +4,7 @@
 from __future__ import annotations
 import logging
 import threading
+import time
 from typing import Optional
 
 from context import get_context, BotContext
@@ -44,6 +45,7 @@ class Engine:
     def start(self):
         self.bus.start()
         self.ctx.stop_event.clear()
+        self.ctx.stats["uptime_start"] = time.time()
         for name, mod in self.modules.items():
             mod.start()
         log.info("Engine started with %d modules", len(self.modules))
@@ -51,6 +53,7 @@ class Engine:
     def stop(self):
         log.info("Stopping engine...")
         self.ctx.stop()
+        self.ctx.stats["uptime_start"] = None
         for name, mod in self.modules.items():
             mod.stop()
         shutdown_bus()

@@ -22,8 +22,7 @@ def test_roster_preserves_duplicate_names_but_distinct_identities(payload):
     roster = decode_roster(payload, 123)
     assert [pokemon.name for pokemon in roster.pokemon] == ["Togepi", "Togepi"]
     assert roster.active_uuid == "uuid-healer"
-    assert [move.spellword for move in roster.find("uuid-healer").moves] == ["m1", "m2"]
-    assert roster.find("uuid-healer").moves[1].remaining_ms == 300
+    assert roster.find("uuid-healer").hp_percent == 100
 
 
 def test_uuid_selection_survives_pokebar_reordering(payload):
@@ -51,7 +50,7 @@ def test_incompatible_snapshot_is_rejected(payload, field, value):
 
 
 @pytest.mark.parametrize("field,value", [("healthPercent", 101), ("healthPercent", True), ("slot", 0),
-                                         ("name", ""), ("uuid", ""), ("name", "bad\nname"), ("moves", {})])
+                                         ("name", ""), ("uuid", ""), ("name", "bad\nname")])
 def test_invalid_pokemon_is_rejected(payload, field, value):
     payload["roster"][0][field] = value
     with pytest.raises(RosterError):
@@ -98,3 +97,23 @@ def test_empty_roster_is_valid_but_has_no_selection(payload):
 def test_name_mismatch_does_not_infer_active_identity(payload):
     payload["pokemonName"] = "Spearow"
     assert decode_roster(payload, 123).active_uuid is None
+
+
+@pytest.mark.parametrize("move", ["m1", "m2", "m3", "m4", "m5", " M5 "])
+def test_manual_move_does_not_require_reported_skill(payload, move):
+    payload["roster"][0].pop("moves")
+    values = selection_values(decode_roster(payload, 123), "uuid-healer", move)
+    assert values["heal_move"] == move.strip().lower()
+
+
+@pytest.mark.parametrize("moves", [None, {}, "invalid", [{"spellword": "m1", "remainingMs": -1}]])
+def test_malformed_skills_are_ignored(payload, moves):
+    payload["roster"][0]["moves"] = moves
+    roster = decode_roster(payload, 123)
+    assert selection_values(roster, "uuid-healer", "m5")["heal_move"] == "m5"
+
+
+@pytest.mark.parametrize("move", ["m0", "m6", "m99", "", None, 1])
+def test_manual_move_rejects_out_of_range_values(payload, move):
+    with pytest.raises(RosterError):
+        selection_values(decode_roster(payload, 123), "uuid-healer", move)

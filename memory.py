@@ -145,6 +145,14 @@ class Process:
         self.architecture = None
         self.last_error = None
 
+    @property
+    def pid(self):
+        return self.pm.process_id if self.pm is not None else None
+
+    @property
+    def is_attached(self):
+        return self.pm is not None and self.base is not None and self.pointer_size in (4, 8)
+
     # -- lifecycle ---------------------------------------------------------
     def attach(self) -> bool:
         global POINTER_SIZE
@@ -226,8 +234,7 @@ class Process:
             for base, size, readable in regions:
                 if base <= addr < base + size:
                     return readable
-            return False
-        # Region walk unavailable -> probe directly.
+        # Fallback to direct probe if region walk missed dynamic page
         try:
             self.pm.read_bytes(addr, 1)
             return True
@@ -430,52 +437,78 @@ class Resolver:
         self.entries = self.data["entries"]
         self._assumed_warned = set()
         self._warning_lock = threading.Lock()
-        log.info("loaded %d offset entries (schema v2)", len(self.entries))
+        self.last_error = None
+        log.info("loaded %d offset entries (schema v2), path=%s", len(self.entries), self.offsets_path)
 
     @staticmethod
     def _load_config(path):
         with open(_normalize_cfg_path(path), encoding="utf-8") as fh:
             return json.load(fh)
 
+    def _resolution_failure(self, name, reason):
+        self.last_error = f"{name}: {reason}"
+        log.debug(self.last_error)
+        return None
+
+    def can_read_field(self, block_name, field_name):
+        entry = self.entries.get(f"{block_name}.{field_name}")
+        return bool(entry and entry["verified"] and entry["base_rva"] is not None
+                    and entry["steps"] is not None and entry["terminal"] is not None
+                    and all(step is not None for step in entry["steps"]))
+
+    def read_optional_field(self, block_name, field_name):
+        if not self.can_read_field(block_name, field_name):
+            return None
+        return self.read_field(block_name, field_name)
+
     def resolve_entry(self, name):
-        """Walk steps, optionally dereference, then add terminal; never cache targets."""
+        """Walk the live chain and retain a specific failure reason."""
+        self.last_error = None
         entry = self.entries.get(name)
-        if not entry or not entry["verified"] or self.proc is None:
-            return None
+        if not entry or not entry["verified"]:
+            return self._resolution_failure(name, "offset ausente ou não verificado")
+        if self.proc is None:
+            return self._resolution_failure(name, "processo indisponível")
         if (entry["base_rva"] is None or entry["steps"] is None
-                or entry["terminal"] is None or any(v is None for v in entry["steps"])):
-            return None
+                or entry["terminal"] is None or any(step is None for step in entry["steps"])):
+            return self._resolution_failure(name, "chain incompleta")
         if self.proc.pointer_size not in (4, 8):
-            return None
+            return self._resolution_failure(name, "arquitetura/processo não anexado")
         module = self.proc.modules.get(entry["module"].lower())
         if module is None or entry["base_rva"] >= module["size"]:
-            return None
+            return self._resolution_failure(name, "módulo ausente ou RVA fora do módulo")
         ceiling = (1 << (8 * self.proc.pointer_size)) - 1
         addr = module["base"] + entry["base_rva"]
         for step in entry["steps"]:
             if not 0 < addr <= ceiling - self.proc.pointer_size + 1:
-                return None
+                return self._resolution_failure(name, "endereço de ponteiro fora do intervalo")
             pointer = self.proc.read_ptr(addr)
-            if pointer is None or pointer == 0:
-                return None
+            if pointer is None:
+                return self._resolution_failure(name, f"falha ao ler ponteiro em 0x{addr:X}")
+            if pointer == 0:
+                return self._resolution_failure(name, f"ponteiro nulo em 0x{addr:X}")
             addr = pointer + step
         if entry.get("deref", False):
             if not 0 < addr <= ceiling - self.proc.pointer_size + 1:
-                return None
+                return self._resolution_failure(name, "endereço de ponteiro fora do intervalo")
             pointer = self.proc.read_ptr(addr)
-            if pointer is None or pointer == 0:
-                return None
+            if pointer is None:
+                return self._resolution_failure(name, f"falha ao ler ponteiro em 0x{addr:X}")
+            if pointer == 0:
+                return self._resolution_failure(name, f"ponteiro nulo em 0x{addr:X}")
             addr = pointer
         addr += entry["terminal"]
-        log.info(
+        log.debug(
             "[resolve] %s base=0x%X rva=0x%X steps=%s terminal=0x%X final=0x%X",
             name, module["base"], entry["base_rva"], entry["steps"],
             entry["terminal"], addr,
         )
         width = struct.calcsize("<" + TYPE_FORMATS[entry["type"]])
         if not 0 < addr <= ceiling - width + 1:
-            return None
-        return addr if self.proc.is_valid_addr(addr) else None
+            return self._resolution_failure(name, "endereço final fora do intervalo")
+        if not self.proc.is_valid_addr(addr):
+            return self._resolution_failure(name, f"endereço final ilegível: 0x{addr:X}")
+        return addr
 
     def read_entry(self, name):
         self.warn_if_assumed(name)
@@ -485,7 +518,7 @@ class Resolver:
         entry = self.entries[name]
         raw = self.proc.read_value(addr, entry["type"])
         if raw is None:
-            return None
+            return self._resolution_failure(name, getattr(self.proc, "last_error", None) or "leitura final falhou")
         if "mask" in entry:
             raw = (raw & entry["mask"]) >> entry.get("shift", 0)
         return raw
@@ -519,6 +552,75 @@ class Resolver:
         # No common struct address can be inferred from independent scalar chains.
         # Legacy creature enumeration is still unimplemented and must stay inactive.
         return None
+
+    def get_party_roster(self):
+        """Decodifica a mochila (Party) do cliente conectado a partir de pokemon.roster."""
+        from core.party_roster import RosterMember
+        if not self.proc or not self.proc.is_attached:
+            return []
+        entry = self.entries.get("pokemon.roster")
+        if not entry or not entry.get("verified") or entry.get("base_rva") is None:
+            return []
+        base = self.proc.base
+        if not base:
+            return []
+        curr = base + entry["base_rva"]
+        for s in (entry.get("steps") or []):
+            if s is None:
+                return []
+            val = self.proc.read_ptr(curr)
+            if not val or val <= 0x10000:
+                return []
+            curr = val + s
+        base_addr = curr + (entry.get("terminal") or 0)
+
+        members = []
+        for slot in range(1, 7):
+            slot_offset = (slot - 1) * 0x10 + 0x08
+            ptr = self.proc.read_ptr(base_addr + slot_offset)
+            if ptr and ptr > 0x10000:
+                name = self.proc.read_string(ptr + 0x80, 32)
+                if name:
+                    name = name.strip()
+                if name and len(name) >= 2 and all(32 <= ord(c) < 127 for c in name):
+                    members.append(RosterMember(slot, name))
+        return members
+
+
+def connect_live_resolver(target, offsets_path=DEFAULT_OFFSETS_PATH,
+                          config_path=DEFAULT_CONFIG_PATH):
+    """Attach once and refuse automation when player HP cannot be read."""
+    config_path = str(Path(_normalize_cfg_path(config_path)).resolve())
+    offsets_path = str(Path(_normalize_cfg_path(offsets_path)).resolve())
+    cfg = Resolver._load_config(config_path)
+    proc = Process(target, config=cfg.get("safety", {}))
+    try:
+        if not proc.attach():
+            raise RuntimeError(f"Falha ao anexar ao processo {target}: {proc.last_error}")
+        if not proc.is_attached or (type(target) is int and proc.pid != target):
+            raise RuntimeError(f"Processo anexado não corresponde ao PID selecionado: {target}")
+        resolver = Resolver(proc, offsets_path=offsets_path, config_path=config_path)
+        log.info("Memória anexada: PID=%s base=0x%X offsets=%s",
+                 proc.pid, proc.base, offsets_path)
+        values = {}
+        errors = {}
+        for field in ("hp", "hp_max"):
+            values[field] = resolver.read_field("player", field)
+            errors[field] = resolver.last_error
+        hp, hp_max = values["hp"], values["hp_max"]
+        if hp is None or hp_max is None:
+            detail = "; ".join(f"player.{field}={values[field]!r} ({errors[field]})"
+                               for field in values)
+            raise RuntimeError(f"Pré-checagem HP falhou no PID {proc.pid}: {detail}. "
+                               "Confirme o personagem conectado e revalide os offsets. "
+                               "Nenhum módulo foi iniciado.")
+        if hp_max <= 0 or not 0 <= hp <= hp_max:
+            raise RuntimeError(f"HP inválido no PID {proc.pid}: {hp}/{hp_max}; início recusado")
+        log.info("Pré-checagem HP: PID=%s HP=%s/%s", proc.pid, hp, hp_max)
+        return resolver
+    except Exception:
+        proc.detach()
+        raise
 
 
 # --------------------------------------------------------------------- CLI

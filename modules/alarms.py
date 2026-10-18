@@ -36,16 +36,16 @@ class Alarms(Module):
 
         # Death check
         if self.ctx.get("alarms", "beep_on", default=[]):
-            dead = self.resolver.read_field("player", "is_dead")
+            dead = self.resolver.read_optional_field("player", "is_dead")
             if dead and not self._was_dead:
                 log.warning("ALARM: Death detected!")
                 self._was_dead = True
                 self._trigger("death")
-            elif not dead:
+            elif dead is not None and not dead:
                 self._was_dead = False
 
         # Disconnect check
-        online = self.resolver.read_field("player", "is_online")
+        online = self.resolver.read_optional_field("player", "is_online")
         if online is not None:
             if not online and self._was_online:
                 if self._disconnect_grace == 0:

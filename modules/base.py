@@ -103,6 +103,9 @@ class Module(ABC):
     def click(self, x: int, y: int, priority: int = 10) -> bool:
         return self.bus.click(x, y, priority, module=self.name)
 
+    def right_click(self, x: int, y: int, priority: int = 10) -> bool:
+        return self.bus.click(x, y, priority, module=self.name, button="right")
+
     def on_config_change(self):
         """Called when config is reloaded."""
         self._reload_config()

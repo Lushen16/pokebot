@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import logging
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -73,15 +74,39 @@ def apply_dark_theme(app: QApplication):
         QPushButton#startBtn:hover {{ background-color: #00ff99; }}
         QPushButton#stopBtn {{ background-color: {DARK_PALETTE['red']}; color: white; font-weight: bold; }}
         QPushButton#stopBtn:hover {{ background-color: #ff6666; }}
-        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{ background-color: {DARK_PALETTE['input_bg']}; border: 1px solid {DARK_PALETTE['border']}; border-radius: 3px; padding: 4px; color: {DARK_PALETTE['input_fg']}; }}
-        QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{ border-color: {DARK_PALETTE['accent']}; }}
+        /* Inputs estilizados com alto contraste para tema escuro */
+        QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit {{
+            background-color: #121316;
+            color: #ffffff;
+            border: 1px solid #333640;
+            border-radius: 4px;
+            padding: 4px;
+        }}
+        QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QLineEdit:focus {{
+            border: 1px solid #5a7dff;
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: #121316;
+            color: #ffffff;
+            selection-background-color: #5a7dff;
+            selection-color: #ffffff;
+            border: 1px solid #333640;
+        }}
+        QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+            background-color: #21242d;
+            border: 1px solid #333640;
+            width: 16px;
+        }}
+        QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+            background-color: #5a7dff;
+        }}
         QTabWidget::pane {{ border: 1px solid {DARK_PALETTE['border']}; background: {DARK_PALETTE['bg']}; }}
         QTabBar::tab {{ background: {DARK_PALETTE['bg_secondary']}; border: 1px solid {DARK_PALETTE['border']}; padding: 8px 16px; margin-right: 2px; }}
         QTabBar::tab:selected {{ background: {DARK_PALETTE['accent']}; color: {DARK_PALETTE['bg']}; }}
         QTabBar::tab:hover {{ background: {DARK_PALETTE['bg_tertiary']}; }}
         QTableWidget {{ background-color: {DARK_PALETTE['input_bg']}; border: 1px solid {DARK_PALETTE['border']}; gridline-color: {DARK_PALETTE['border']}; }}
         QHeaderView::section {{ background-color: {DARK_PALETTE['bg_secondary']}; color: {DARK_PALETTE['accent']}; padding: 4px; border: 1px solid {DARK_PALETTE['border']}; }}
-        QListWidget {{ background-color: {DARK_PALETTE['input_bg']}; border: 1px solid {DARK_PALETTE['border']}; }}
+        QListWidget {{ background-color: #121316; border: 1px solid #333640; color: #ffffff; }}
         QTextEdit {{ background-color: {DARK_PALETTE['input_bg']}; border: 1px solid {DARK_PALETTE['border']}; color: {DARK_PALETTE['fg']}; }}
         QScrollBar:vertical {{ background: {DARK_PALETTE['bg']}; width: 10px; }}
         QScrollBar::handle:vertical {{ background: {DARK_PALETTE['border']}; border-radius: 5px; min-height: 30px; }}
@@ -94,6 +119,20 @@ def apply_dark_theme(app: QApplication):
 
 
 # ─── Worker Thread ────────────────────────────────────────────────────────
+
+class QtLogBridge(logging.Handler):
+    """Forwards Python logging records to a Qt Signal."""
+    def __init__(self, signal):
+        super().__init__()
+        self.signal = signal
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.signal.emit(record.levelname, msg)
+        except Exception:
+            pass
+
 
 class BotWorker(QObject):
     """Runs the engine in a background thread."""
@@ -108,34 +147,35 @@ class BotWorker(QObject):
         self._running = False
 
     def run(self):
-        self._running = True
-        self.engine.start()
-        self.log_message.emit("INFO", "Bot started")
+        try:
+            self._running = True
+            self.engine.start()
+            self.log_message.emit("INFO", "Bot started")
 
-        # Periodic status updates
-        timer = QTimer()
-        timer.timeout.connect(self._emit_status)
-        timer.start(1000)  # 1 second
-
-        # Keep thread alive
-        while self._running and not self.engine.ctx.is_stopped():
-            self.msleep(100)
-
-        timer.stop()
-        self.engine.stop()
-        self.log_message.emit("INFO", "Bot stopped")
-        self.finished.emit()
+            # Periodic status updates and keep thread alive
+            while self._running and not self.engine.ctx.is_stopped():
+                self._emit_status()
+                time.sleep(0.5)
+        except Exception as exc:
+            log.exception("BotWorker run error: %s", exc)
+            self.log_message.emit("ERROR", f"BotWorker error: {exc}")
+        finally:
+            if self.engine:
+                try:
+                    self.engine.stop()
+                except Exception:
+                    pass
+            self.log_message.emit("INFO", "Bot stopped")
+            self.finished.emit()
 
     def stop(self):
         self._running = False
-        self.engine.stop()
+        if self.engine:
+            self.engine.stop()
 
     def _emit_status(self):
         if self.engine:
             self.status_update.emit(self.engine.get_status())
-
-    def msleep(self, ms):
-        QThread.msleep(ms)
 
 
 # ─── Main Window ──────────────────────────────────────────────────────────
@@ -182,6 +222,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_loot, "💰 Loot")
         self.tabs.addTab(self.tab_settings, "⚙️ Settings")
         self.tabs.addTab(self.tab_debug, "🔧 Debug")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # Status bar
         self.status_bar = QStatusBar()
@@ -194,6 +235,20 @@ class MainWindow(QMainWindow):
 
         # Control buttons at bottom
         control_bar = QHBoxLayout()
+        control_bar.setContentsMargins(10, 0, 10, 0)
+        control_bar.setSpacing(10)
+
+        self.btn_select_process = QPushButton("🔍 Selecionar Processo")
+        self.btn_select_process.setFixedHeight(38)
+        self.btn_select_process.setStyleSheet(f"background-color: {DARK_PALETTE['bg_secondary']}; color: #ffffff; padding: 0 14px; border: 1px solid {DARK_PALETTE['border']}; border-radius: 4px; font-weight: bold;")
+        self.btn_select_process.clicked.connect(self._open_process_selector)
+
+        init_name = self.ctx.get("client", "process_name", default="PokeAlliance_dx.exe")
+        init_pid = self.ctx.get("client", "target_pid", default=None)
+        pid_text = f" [PID {init_pid}]" if init_pid else ""
+        self.lbl_active_process = QLabel(f"Cliente: {init_name}{pid_text}")
+        self.lbl_active_process.setStyleSheet(f"color: {DARK_PALETTE['accent']}; font-weight: bold;")
+
         self.btn_start = QPushButton("▶ START")
         self.btn_start.setObjectName("startBtn")
         self.btn_start.setFixedHeight(40)
@@ -206,6 +261,9 @@ class MainWindow(QMainWindow):
         self.btn_pause = QPushButton("⏸ PAUSE")
         self.btn_pause.setFixedHeight(40)
         self.btn_pause.clicked.connect(self._on_pause)
+
+        control_bar.addWidget(self.btn_select_process)
+        control_bar.addWidget(self.lbl_active_process)
         control_bar.addStretch()
         control_bar.addWidget(self.btn_start)
         control_bar.addWidget(self.btn_pause)
@@ -216,6 +274,58 @@ class MainWindow(QMainWindow):
         control_widget = QWidget()
         control_widget.setLayout(control_bar)
         self.status_bar.addPermanentWidget(control_widget)
+
+    def _open_process_selector(self):
+        from gui.process_selector import ProcessSelectorDialog
+        current_pid = self.ctx.get("client", "target_pid", default=None)
+        current_name = self.ctx.get("client", "process_name", default="PokeAlliance_dx.exe")
+        dlg = ProcessSelectorDialog(self, current_pid=current_pid, current_name=current_name)
+        if dlg.exec():
+            if dlg.selected_name:
+                self.ctx.set(dlg.selected_name, "client", "process_name")
+                if dlg.selected_pid:
+                    self.ctx.set(dlg.selected_pid, "client", "target_pid")
+                pid_info = f" [PID {dlg.selected_pid}]" if dlg.selected_pid else ""
+                display_str = f"{dlg.selected_name}{pid_info}"
+                if hasattr(self, "lbl_active_process"):
+                    self.lbl_active_process.setText(f"Cliente: {display_str}")
+                if hasattr(self, "lbl_dash_process"):
+                    self.lbl_dash_process.setText(display_str)
+                if hasattr(self, "edit_process"):
+                    self.edit_process.setText(dlg.selected_name)
+                self._log("INFO", f"Processo alvo selecionado: {display_str}")
+                if hasattr(self, "pokemon_healer_selector"):
+                    self.pokemon_healer_selector.detect_roster()
+
+    def _on_test_healer(self):
+        self.pokemon_healer_selector.save_selection()
+        self.ctx.save_config()
+
+        def _worker():
+            if self.engine and self.engine.modules.get('healer'):
+                healer = self.engine.modules['healer']
+                healer.on_config_change()
+                healer.force_heal_sequence()
+                self._log('INFO', '[TESTE] Sequência de cura forçada executada no bot ativo!')
+            else:
+                try:
+                    from inputbus import get_bus
+                    from modules.healer import Healer
+                    bus = get_bus()
+                    bus.start()
+                    healer = Healer(ctx=self.ctx, bus=bus, resolver=self.resolver)
+                    healer.force_heal_sequence()
+                    self._log('INFO', '[TESTE] Sequência forçada de cura executada com sucesso!')
+                except Exception as exc:
+                    self._log('ERROR', f'[TESTE] Falha ao executar cura de teste: {exc}')
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_tab_changed(self, index: int):
+        if hasattr(self, "tab_combat") and self.tabs.widget(index) == self.tab_combat:
+            if hasattr(self, "pokemon_healer_selector"):
+                self.pokemon_healer_selector.detect_roster()
 
     def _create_dashboard_tab(self) -> QWidget:
         w = QWidget()
@@ -231,6 +341,12 @@ class MainWindow(QMainWindow):
         s_layout.addRow("Uptime:", self.lbl_dash_uptime)
         self.lbl_dash_modules = QLabel("0/6 active")
         s_layout.addRow("Modules:", self.lbl_dash_modules)
+        init_name = self.ctx.get("client", "process_name", default="PokeAlliance_dx.exe")
+        init_pid = self.ctx.get("client", "target_pid", default=None)
+        pid_text = f" [PID {init_pid}]" if init_pid else ""
+        self.lbl_dash_process = QLabel(f"{init_name}{pid_text}")
+        self.lbl_dash_process.setStyleSheet(f"color: {DARK_PALETTE['accent']}; font-weight: bold;")
+        s_layout.addRow("Processo:", self.lbl_dash_process)
         layout.addWidget(status_group)
 
         # Stats group
@@ -444,51 +560,10 @@ class MainWindow(QMainWindow):
         w = QWidget()
         layout = QVBoxLayout(w)
         self.pokemon_healer_selector = PokemonHealerSelector(
-            self.ctx, w, pid_provider=lambda: self.resolver.proc.pid if self.resolver else None)
+            self.ctx, w, pid_provider=lambda: self.resolver.proc.pid if self.resolver else None,
+            resolver_provider=lambda: self.resolver,
+            test_healer_callback=self._on_test_healer)
         layout.addWidget(self.pokemon_healer_selector)
-
-        # Healer settings
-        h_group = QGroupBox("Healer")
-        h_layout = QFormLayout(h_group)
-
-        self.spin_hp_thresh = QSpinBox()
-        self.spin_hp_thresh.setRange(1, 99)
-        self.spin_hp_thresh.setValue(self.ctx.get("healer", "hp_percent_threshold", default=60))
-        self.spin_hp_thresh.valueChanged.connect(lambda v: self.ctx.set(v, "healer", "hp_percent_threshold"))
-        h_layout.addRow("HP Threshold (%):", self.spin_hp_thresh)
-
-        self.spin_hp_above = QSpinBox()
-        self.spin_hp_above.setRange(1, 100)
-        self.spin_hp_above.setValue(self.ctx.get("healer", "hp_above_percent", default=85))
-        self.spin_hp_above.valueChanged.connect(lambda v: self.ctx.set(v, "healer", "hp_above_percent"))
-        h_layout.addRow("HP Stop Above (%):", self.spin_hp_above)
-
-        self.spin_mp_thresh = QSpinBox()
-        self.spin_mp_thresh.setRange(1, 99)
-        self.spin_mp_thresh.setValue(self.ctx.get("healer", "mp_percent_threshold", default=40))
-        self.spin_mp_thresh.valueChanged.connect(lambda v: self.ctx.set(v, "healer", "mp_percent_threshold"))
-        h_layout.addRow("MP Threshold (%):", self.spin_mp_thresh)
-
-        self.spin_mp_above = QSpinBox()
-        self.spin_mp_above.setRange(1, 100)
-        self.spin_mp_above.setValue(self.ctx.get("healer", "mp_above_percent", default=90))
-        self.spin_mp_above.valueChanged.connect(lambda v: self.ctx.set(v, "healer", "mp_above_percent"))
-        h_layout.addRow("MP Stop Above (%):", self.spin_mp_above)
-
-        self.spin_panic_hp = QSpinBox()
-        self.spin_panic_hp.setRange(1, 50)
-        self.spin_panic_hp.setValue(self.ctx.get("healer", "panic_hp_percent", default=25))
-        self.spin_panic_hp.valueChanged.connect(lambda v: self.ctx.set(v, "healer", "panic_hp_percent"))
-        h_layout.addRow("Panic HP (%):", self.spin_panic_hp)
-
-        self.spin_heal_delay = QSpinBox()
-        self.spin_heal_delay.setRange(100, 5000)
-        self.spin_heal_delay.setSingleStep(50)
-        self.spin_heal_delay.setValue(self.ctx.get("healer", "delay_between_heals_ms", default=650))
-        self.spin_heal_delay.valueChanged.connect(lambda v: self.ctx.set(v, "healer", "delay_between_heals_ms"))
-        h_layout.addRow("Delay Between Heals (ms):", self.spin_heal_delay)
-
-        layout.addWidget(h_group)
 
         # Auto-food
         f_group = QGroupBox("Auto-Food")
@@ -543,7 +618,12 @@ class MainWindow(QMainWindow):
         c_layout.addRow("Stop If HP Above (%):", self.spin_catch_stop_hp)
 
         layout.addWidget(c_group)
-        return w
+        layout.addStretch()
+        w.setMinimumHeight(w.sizeHint().height())
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(w)
+        return scroll
 
     def _create_loot_tab(self) -> QWidget:
         w = QWidget()
@@ -578,9 +658,14 @@ class MainWindow(QMainWindow):
         gen_group = QGroupBox("General")
         gen_layout = QFormLayout(gen_group)
 
+        proc_row = QHBoxLayout()
         self.edit_process = QLineEdit(self.ctx.get("client", "process_name", default="PokeAlliance_dx.exe"))
         self.edit_process.textChanged.connect(lambda v: self.ctx.set(v, "client", "process_name"))
-        gen_layout.addRow("Process Name:", self.edit_process)
+        btn_sel_proc = QPushButton("🔍 Selecionar...")
+        btn_sel_proc.clicked.connect(self._open_process_selector)
+        proc_row.addWidget(self.edit_process)
+        proc_row.addWidget(btn_sel_proc)
+        gen_layout.addRow("Process Name:", proc_row)
 
         self.edit_window_title = QLineEdit(self.ctx.get("client", "window_title_pattern", default="PokeAlliance"))
         self.edit_window_title.textChanged.connect(lambda v: self.ctx.set(v, "client", "window_title_pattern"))
@@ -755,6 +840,7 @@ class MainWindow(QMainWindow):
         pass  # Values loaded in widget creation
 
     def _save_config(self):
+        self.pokemon_healer_selector.save_selection()
         self.ctx.save_config()
         self._log("INFO", "Configuration saved")
 
@@ -823,22 +909,23 @@ class MainWindow(QMainWindow):
             return
         self._log("INFO", "Starting bot...")
 
-        # Create resolver with live process
         try:
-            from memory import Process, Resolver
+            from memory import connect_live_resolver
+            self.pokemon_healer_selector.save_selection()
+            self.ctx.save_config()
+            target_pid = self.ctx.get("client", "target_pid", default=None)
             proc_name = self.ctx.get("client", "process_name", default="PokeAlliance_dx.exe")
-            proc = Process(proc_name, config=self.ctx.config.get("safety", {}))
-            if not proc.attach():
-                self._log("ERROR", "Failed to attach to process")
-                QMessageBox.critical(self, "Error", "Failed to attach to PokeAlliance_dx.exe")
-                return
-            self.resolver = Resolver(proc, offsets_path="offsets.json", config_path=self.config_path)
+            target = target_pid if target_pid else proc_name
+            self.resolver = connect_live_resolver(target, config_path=self.config_path)
+            self.engine = create_engine(config_path=self.config_path, resolver=self.resolver)
         except Exception as exc:
-            self._log("ERROR", f"Resolver init failed: {exc}")
-            QMessageBox.critical(self, "Error", f"Failed to initialize resolver: {exc}")
+            if self.resolver:
+                self.resolver.proc.detach()
+                self.resolver = None
+            self.engine = None
+            self._log("ERROR", f"Inicialização recusada: {exc}")
+            QMessageBox.critical(self, "Falha ao iniciar", str(exc))
             return
-
-        self.engine = create_engine(config_path=self.config_path, resolver=self.resolver)
 
         self.worker_thread = QThread()
         self.worker = BotWorker(self.engine, self.resolver)
@@ -847,6 +934,11 @@ class MainWindow(QMainWindow):
         self.worker.status_update.connect(self._on_status_update)
         self.worker.log_message.connect(self._log)
         self.worker.finished.connect(self._on_worker_finished)
+
+        self._log_handler = QtLogBridge(self.worker.log_message)
+        self._log_handler.setFormatter(logging.Formatter("%(message)s"))
+        logging.getLogger("pokebot").addHandler(self._log_handler)
+
         self.worker_thread.start()
 
         self.btn_start.setEnabled(False)
@@ -868,12 +960,22 @@ class MainWindow(QMainWindow):
                 self.btn_pause.setText("▶ RESUME")
 
     def _on_worker_finished(self):
+        if hasattr(self, "_log_handler") and self._log_handler:
+            try:
+                logging.getLogger("pokebot").removeHandler(self._log_handler)
+            except Exception:
+                pass
+            self._log_handler = None
+
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("⏸ PAUSE")
-        self.worker_thread.quit()
-        self.worker_thread.wait()
+        self.lbl_connection.setText("● Disconnected")
+        self.lbl_connection.setStyleSheet(f"color: {DARK_PALETTE['red']};")
+        if self.worker_thread:
+            self.worker_thread.quit()
+            self.worker_thread.wait()
         self.worker = None
         self.worker_thread = None
         self.engine = None
@@ -905,10 +1007,21 @@ class MainWindow(QMainWindow):
         self._refresh_waypoint_table()
 
     def _update_status_bar(self):
-        if self.engine and self.engine.ctx:
-            uptime = self.engine.ctx.stats.get("uptime_start")
-            # Would calculate uptime
-            pass
+        if self.engine and self.engine.ctx and getattr(self.engine, "running", False):
+            self.lbl_connection.setText("● Connected")
+            self.lbl_connection.setStyleSheet(f"color: {DARK_PALETTE['green']}; font-weight: bold;")
+            start_ts = self.engine.ctx.stats.get("uptime_start")
+            if start_ts:
+                elapsed = int(time.time() - start_ts)
+                h = elapsed // 3600
+                m = (elapsed % 3600) // 60
+                s = elapsed % 60
+                txt = f"{h:02d}:{m:02d}:{s:02d}"
+                self.lbl_uptime.setText(f"Uptime: {txt}")
+                self.lbl_dash_uptime.setText(txt)
+        else:
+            self.lbl_connection.setText("● Disconnected")
+            self.lbl_connection.setStyleSheet(f"color: {DARK_PALETTE['red']};")
 
     def _run_scanner_test(self, test: str):
         import subprocess

@@ -87,8 +87,11 @@ def _window_titles() -> dict[int, list[str]]:
                     titles.setdefault(pid.value, []).append(buf.value)
         return True
 
-    if not user32.EnumWindows(visit, 0):
-        raise ctypes.WinError(ctypes.get_last_error())
+    ctypes.set_last_error(0)
+    user32.EnumWindows(visit, 0)
+    err = ctypes.get_last_error()
+    if err != 0:
+        raise ctypes.WinError(err)
     return titles
 
 
@@ -719,6 +722,7 @@ class MemoryReader:
         addr = self.resolve_entry_address(entry)
         if addr is None:
             return None
+        self._last_resolved_entry_addr = addr
 
         type_name = entry.get("type", "int32")
         spec = self.TYPE_SPECS.get(type_name)
@@ -739,6 +743,40 @@ class MemoryReader:
                 val >>= shift
 
         return val
+
+    def decode_roster(self, address: Optional[int] = None) -> list[dict]:
+        """
+        Decodifica os 6 slots de Pokemon da Party (mochila).
+        Le a partir do endereco base resolvido do array ou do endereco fornecido.
+        Cada slot tem stride 0x10 com ponteiro da struct em +0x08.
+        O nome do Pokemon fica em +0x80 da struct (ASCII, null-terminated).
+        """
+        base_addr = None
+        if isinstance(address, int) and self.is_valid_address(address):
+            base_addr = address
+        elif hasattr(self, "_last_resolved_entry_addr") and self._last_resolved_entry_addr:
+            if self.is_valid_address(self._last_resolved_entry_addr):
+                base_addr = self._last_resolved_entry_addr
+
+        if base_addr is None:
+            return [{"slot": slot, "name": f"Slot {slot}"} for slot in range(1, 7)]
+
+        rows = []
+        for slot in range(1, 7):
+            slot_offset = (slot - 1) * 0x10 + 0x08
+            ptr = self.read_ptr(base_addr + slot_offset)
+            if ptr and ptr > 0x10000 and self.is_valid_address(ptr):
+                name_bytes = self.read_bytes(ptr + 0x80, 32)
+                name = ""
+                if name_bytes:
+                    name = name_bytes.split(b"\x00")[0].decode("ascii", errors="ignore").strip()
+                if name and len(name) >= 2 and all(32 <= ord(c) < 127 for c in name):
+                    rows.append({"slot": slot, "name": name})
+                else:
+                    rows.append({"slot": slot, "name": f"Slot {slot}"})
+            else:
+                rows.append({"slot": slot, "name": f"Slot {slot}"})
+        return rows
 
     def write_entry(self, entry: Dict[str, Any], value: Any) -> bool:
         """Resolves address and writes typed value."""

@@ -14,25 +14,29 @@
     },
     "player.hp": {
       "module": "PokeAlliance_dx.exe",
-      "base_rva": 59908704,
-      "steps": [0],
+      "base_rva": 59788600,
+      "steps": [
+        0
+      ],
       "terminal": 0,
       "deref": false,
       "type": "int32",
       "verified": true,
       "source": "reversed_disasm",
-      "note": "Validado por pointer scan em sessão 2026-10-16"
+      "note": "2026-10-17: RVA 0x3904D38 validado na sessao PID 31952; HP acompanhou 94 -> 88 -> 79 em 0x19CA8F90000. verified refere-se somente a esta sessao; restart pendente. RVA antigo 0x3922260 estava nulo."
     },
     "player.hp_max": {
       "module": "PokeAlliance_dx.exe",
-      "base_rva": 59908704,
-      "steps": [0],
+      "base_rva": 59788600,
+      "steps": [
+        0
+      ],
       "terminal": 4,
       "type": "int32",
       "deref": false,
       "verified": true,
       "source": "reversed_disasm",
-      "note": "Validado por pointer scan; mesmo ponteiro do player.hp, terminal +4"
+      "note": "2026-10-17: mesmo ponteiro do player.hp (RVA 0x3904D38), terminal +4; leitura 200 durante HP 88 e 79 no PID 31952. verified refere-se somente a esta sessao; confirmar maximo na tela e restart pendentes."
     },
     "player.mp": {
       "module": "PokeAlliance_dx.exe",
@@ -73,7 +77,7 @@
       "terminal": 40,
       "type": "int32",
       "verified": true,
-      "note": "CE pointer chain: read_ptr(module_base + base_rva) + terminal. User reports validation across client restarts.",
+      "note": "X = read_ptr(PokeAlliance_dx.exe + 0x3917F80) + 0x28. Alt v3.1.2 chain: base_rva=59788456 (0x3904CA8), steps=[80, 8], terminal=40.",
       "source": "verified_ce"
     },
     "player.y": {
@@ -85,7 +89,7 @@
       "terminal": 44,
       "type": "int32",
       "verified": true,
-      "note": "CE pointer chain: read_ptr(module_base + base_rva) + terminal. User reports validation across client restarts.",
+      "note": "Y = read_ptr(PokeAlliance_dx.exe + 0x3917F80) + 0x2C. Alt v3.1.2 chain: base_rva=59788456 (0x3904CA8), steps=[80, 8], terminal=44.",
       "source": "verified_ce"
     },
     "player.z": {
@@ -97,7 +101,7 @@
       "terminal": 48,
       "type": "int32",
       "verified": true,
-      "note": "CE pointer chain: read_ptr(module_base + base_rva) + terminal. User reports validation across client restarts.",
+      "note": "Z = read_ptr(PokeAlliance_dx.exe + 0x3917F80) + 0x30. Alt v3.1.2 chain: base_rva=59788456 (0x3904CA8), steps=[80, 8], terminal=48.",
       "source": "verified_ce",
       "mask": 255,
       "shift": 0
@@ -352,6 +356,21 @@
       "source": "verified_ce",
       "verified": true,
       "note": "Active/selected Pokemon HP percentage, not absolute HP. User confirmed damage/healing, switching 87 -> 100 -> 87, and persistence after client restart. Call at +62D35E passes address of global slot +3921B48; callee +62D040 dereferences it and writes a computed percentage at object+3C8. Re-read pointer on every access."
+    },
+    "pokemon.roster": {
+      "module": "PokeAlliance_dx.exe",
+      "base_rva": 59757872,
+      "steps": [
+        7928,
+        2608,
+        5192
+      ],
+      "terminal": 0,
+      "deref": false,
+      "type": "uint32",
+      "source": "verified_ce",
+      "verified": true,
+      "note": "Party Array base (PokeAlliance_dx.exe + 0x38FD530 -> +0x1ef8 -> +0xa30 -> +0x1448). Each slot has stride 0x10 with pokemon struct pointer at +0x08."
     }
   }
 }

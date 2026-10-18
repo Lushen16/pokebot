@@ -164,7 +164,7 @@ class ContractTests(unittest.TestCase):
         path = Path(__file__).with_name("offsets.json")
         entries = validate_offsets(json.loads(path.read_text(encoding="utf-8")))["entries"]
         entries = {name: entry for name, entry in entries.items()
-                   if name not in {"player.x", "player.y", "player.z", "player.hp", "player.hp_max", "pokemon.hp_percent"}}
+                   if name not in {"player.x", "player.y", "player.z", "player.hp", "player.hp_max", "pokemon.hp_percent", "pokemon.roster"}}
         self.assertTrue(entries)
         self.assertTrue(all(not entry["verified"] for entry in entries.values()))
         self.assertTrue(all(entry["base_rva"] is None and entry["steps"] is None

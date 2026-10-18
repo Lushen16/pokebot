@@ -18,9 +18,11 @@ Atualizado em 17/10/2026. Este documento substitui as suposições desatualizada
 - core/pokemon_roster.py: adaptador somente leitura de telemetria local; valida PID, contrato, integridade e frescor.
 - gui/pokemon_selector.py: seleção por UUID, escolha de cliente e atualização da lista.
 - gui/main.py: painel integrado à aba Combat; configuração nas chaves healer.heal_pokemon_uuid, healer.heal_pokemon_name e healer.heal_move.
-- PENDENTE: o código atual ainda deriva a lista de moves da telemetria. Substituir por opções fixas M1–M5 e remover a dependência de moves/cooldowns do adaptador, GUI, testes e documentação.
+- IMPLEMENTADO: escolha manual fixa M1–M5; o adaptador ignora skills/cooldowns da telemetria. Seleção por UUID preservada.
 - PENDENTE: implementar máquina de estados de cura, com seleção confirmada, espera não bloqueante, uso do move e retorno ao Pokémon original por identidade.
-- Não presumir que F1–F6 selecionam Pokémon, nem que M1 significa uma tecla Windows. Calibrar os controles reais antes de executar.
+- Confirmado pelo usuário: botão direito em outro Pokémon da pokébar já troca diretamente, sem recolher antes. O ativo pode subir ao topo; resolver posição atual por UUID.
+- Move: digitar m1–m5 no chat e enviar com Enter, ou usar uma hotkey configurada no jogo. Não presumir F1–F5. A abertura/estado do chat e as hotkeys reais ainda precisam ser calibrados.
+- Infra adicionada: Module.right_click e InputBus.click(..., button="right"), preservando clique esquerdo padrão; ainda falta ligar a sequência de cura e calibrar os centros dos slots na área cliente.
 - Comando de reset, se necessário, e política de retorno ainda não foram definidos.
 
 ## Fonte atual da lista de Pokémon — dependência importante
@@ -66,7 +68,7 @@ Não adicionar offsets inventados nem promover candidatos a verified=true. As de
 ## Próxima retomada — ordem recomendada
 1. Verificar processo atual e comparar player.hp e player.hp_max com a tela, sem enviar teclas.
 2. Confirmar que a telemetria pertence ao PID correto e está recente.
-3. Aplicar a correção M1–M5 manual, sem leitura de skills/cooldowns; preservar escolha por UUID.
+3. Validar na GUI a seleção manual M1–M5 e a preservação da escolha por UUID.
 4. Rodar testes focados, suíte completa e compilação dos arquivos da GUI. Teste visual exige instalar PySide6 no ambiente apropriado.
 5. Calibrar os controles reais de seleção, execução de M1–M5 e retorno. Só depois implementar/testar a sequência de cura com autorização do usuário.
 
@@ -80,6 +82,14 @@ python -m pytest tests/test_pokemon_roster.py tests/test_pokemon_selector.py -q
 python -m pytest -q
 python -m compileall -q core/pokemon_roster.py gui/pokemon_selector.py gui/main.py
 ~~~
+
+## Diagnóstico ao vivo em 17/10/2026 — falha de HP
+- PID 31952, base 0x7FF7AC840000; ambos os leitores (core.MemoryReader da CLI e memory.Process/Resolver da GUI) anexaram ao mesmo processo elevado.
+- As leituras dos ponteiros de 8 bytes em base+0x3922260 e base+0x3921B48 retornaram zero nos dois leitores. player.hp, player.hp_max e pokemon.hp_percent retornaram None.
+- O arquivo do cliente tinha LastWriteTime 17/10/2026 09:33:18. Isso é diferente da inspeção histórica de 16/10, mas não comprova número de versão nem a causa por si só.
+- Portanto não é correto atribuir esta ocorrência exclusivamente à injeção do leitor na GUI. Confirmar personagem conectado e HP visível antes de procurar offsets novos; valores zero também podem depender do estado do cliente.
+- GUI agora bloqueia início sem HP/max legíveis e registra PID, base, arquivo de offsets e causa. Alarmes não leem campos não verificados nem inventam estado de conexão/morte.
+- Nenhum offset foi modificado nesta correção. Snapshots continuam históricos, não uma validação deste executável.
 
 ## Atualização do cliente
 O executável tinha LastWriteTime 16/10/2026 19:14:38 e versão de arquivo/produto vazia na inspeção anterior. Isso não prova versão 3.1.2 nem invalida automaticamente offsets. Não reutilizar afirmações relativas como “faltam 40 minutos”; a janela citada em conversas antigas já passou. Revalidar por leitura e comparação observável.

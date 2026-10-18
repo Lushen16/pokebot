@@ -26,6 +26,10 @@ class Cavebot(Module):
         if self.ctx.is_stopped() or self.ctx.is_paused():
             return
 
+        # Pausa o deslocamento do cavebot se o healer estiver executando a rotina de cura
+        if self.ctx.get("combat", "healing_in_progress", default=False):
+            return
+
         import time
         if time.monotonic() < self._combat_pause_until:
             return

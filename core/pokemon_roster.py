@@ -10,21 +10,14 @@ import json
 import math
 import os
 from pathlib import Path
-import re
 import time
 
 MAX_TELEMETRY_BYTES = 1024 * 1024
+MANUAL_MOVES = ("m1", "m2", "m3", "m4", "m5")
 
 
 class RosterError(ValueError):
     """Telemetria ausente, incompatível ou desatualizada."""
-
-
-@dataclass(frozen=True)
-class PokemonMove:
-    spellword: str
-    remaining_ms: int
-    total_ms: int
 
 
 @dataclass(frozen=True)
@@ -33,7 +26,6 @@ class Pokemon:
     name: str
     slot: int
     hp_percent: int
-    moves: tuple[PokemonMove, ...]
 
 
 @dataclass(frozen=True)
@@ -84,25 +76,7 @@ def decode_roster(data, pid):
             raise RosterError("UUID ou slot duplicado na pokébar")
         identities.add(uuid)
         slots.add(slot)
-        raw_moves = row.get("moves", [])
-        if not isinstance(raw_moves, list) or len(raw_moves) > 64:
-            raise RosterError("lista de habilidades inválida")
-        moves = []
-        seen_moves = set()
-        for move in raw_moves:
-            if not isinstance(move, dict):
-                raise RosterError("habilidade inválida")
-            word = move.get("spellword")
-            if not isinstance(word, str) or not re.fullmatch(r"m[1-9][0-9]?", word):
-                continue
-            if word in seen_moves:
-                raise RosterError("skill duplicada")
-            seen_moves.add(word)
-            remaining = _integer(move.get("remainingMs"), 0, 0xFFFFFFFF)
-            total = _integer(move.get("totalMs"), 0, 0xFFFFFFFF)
-            moves.append(PokemonMove(word, remaining, total))
-        moves.sort(key=lambda move: int(move.spellword[1:]))
-        pokemon.append(Pokemon(uuid, name, slot, hp_percent, tuple(moves)))
+        pokemon.append(Pokemon(uuid, name, slot, hp_percent))
     pokemon.sort(key=lambda item: item.slot)
     active_slot = _integer(data.get("activeSlot", 0), 0, 6)
     active_name = data.get("pokemonName", "")
@@ -144,7 +118,8 @@ def selection_values(roster, uuid, spellword):
     pokemon = roster.find(uuid)
     if pokemon is None:
         raise RosterError("Pokémon escolhido não está na pokébar atual")
-    if not any(move.spellword == spellword for move in pokemon.moves):
-        raise RosterError("skill escolhida não está disponível nesse Pokémon")
+    if not isinstance(spellword, str) or spellword.strip().lower() not in MANUAL_MOVES:
+        raise RosterError("escolha manualmente uma skill de M1 a M5")
+    spellword = spellword.strip().lower()
     return {"heal_pokemon_uuid": pokemon.uuid, "heal_pokemon_name": pokemon.name,
             "heal_move": spellword}

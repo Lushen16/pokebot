@@ -11,12 +11,11 @@ Automação e leitura de memória de alta performance para client de jogo (Tibia
 ## Escolha do Pokémon de cura e skill
 Contexto atualizado e pendências: [CONTEXTO_RETOMADA.md](CONTEXTO_RETOMADA.md).
 Snapshot dos offsets: [backup_ponteiros](backup_ponteiros/README.md).
-Requisito confirmado, ainda pendente: escolha manual fixa de M1–M5,
-sem ler skills nem cooldowns da telemetria. O comportamento descrito abaixo
-é o estado atual, anterior a esse ajuste; ainda não executa cura por Pokémon.
+A skill é escolhida manualmente entre M1–M5, sem ler habilidades ou
+cooldowns da telemetria. O painel ainda não executa cura por Pokémon.
 
 Na aba Combat, o painel Pokémon de cura lista os Pokémon da pokébar
-do cliente escolhido e permite selecionar uma skill ativa (m1, m2 etc.).
+do cliente escolhido e permite escolher manualmente M1, M2, M3, M4 ou M5.
 A seleção usa UUID, não nome ou slot: continua identificando o mesmo
 Pokémon quando a pokébar muda de ordem e distingue nomes repetidos.
 As opções são atualizadas a cada segundo e configurações ficam nas chaves
@@ -25,10 +24,20 @@ Use o botão de salvar configurações ou feche normalmente a GUI para persistir
 A fonte atual é somente leitura de `%LOCALAPPDATA%/OTPbot/telemetry_<PID>.json`,
 publicada pelo PKA Tools; não é detecção independente por MemoryReader.
 Telemetria ausente/desatualizada desabilita a seleção, sem apagar a escolha.
-Os nomes das skills são seus comandos mX; o usuário deve escolher a que cura
-o personagem. Habilidades passivas não aparecem como opções.
+O usuário informa o slot do move que cura o personagem. A lista fixa não
+depende das habilidades reportadas, nem consulta cooldowns. M1–M5 ainda
+não são mapeados automaticamente para teclas Windows.
 Este painel não aciona troca de Pokémon nem skills; o healer por hotkey
 legado abaixo continua separado. A GUI requer PySide6.
+
+## Pré-checagem da memória na GUI
+Antes de criar o Engine, a GUI anexa ao PID selecionado e valida player.hp e
+player.hp_max no mesmo processo que será entregue aos módulos. Se falhar,
+mostra o motivo e não inicia a automação. O log registra PID, base e caminho
+absoluto dos offsets; o arquivo padrão é o offsets.json da raiz do projeto.
+Ponteiro nulo, leitura ilegível e campo não verificado são diagnósticos distintos.
+Os alarmes de morte/conexão só consultam offsets completos e verificados;
+estado indisponível permanece desconhecido, sem simular online ou morto.
 
 ## Healer por hotkey
 O healer usa somente `player.hp` e `player.hp_max`; MP não bloqueia a cura.

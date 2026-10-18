@@ -1,11 +1,10 @@
-# pokebot/__main__.py
+# pokebot/__main__.py / main.py
 """Entry point for the PKA Bot."""
 
 from __future__ import annotations
 import sys
 import argparse
 
-from gui.main import main as gui_main
 from context import get_context
 from engine import create_engine
 from memory import Process, Resolver
@@ -41,6 +40,13 @@ def run_bot(config_path: str = None):
 
 def run_gui(config_path: str = None):
     """Run the bot with GUI."""
+    try:
+        from gui.main import main as gui_main
+    except ImportError as e:
+        print(f"[AVISO] PySide6 não está instalado no ambiente ({e}).")
+        print("Iniciando o bot em modo console (--headless)...")
+        print("Para abrir a interface gráfica no futuro: pip install PySide6\n")
+        return run_bot(config_path)
     return gui_main(config_path)
 
 

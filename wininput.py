@@ -13,6 +13,8 @@ KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
 
 
 class MOUSEINPUT(ctypes.Structure):
@@ -90,8 +92,12 @@ def vk_to_scancode(vk):
     return _user32().MapVirtualKeyW(vk, 4)
 
 
-def send_mouse_button(down):
-    flags = MOUSEEVENTF_LEFTDOWN if down else MOUSEEVENTF_LEFTUP
+def send_mouse_button(down, button="left"):
+    if button not in ("left", "right"):
+        raise ValueError("Mouse button must be left or right")
+    pressed, released = ((MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP) if button == "left"
+                         else (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP))
+    flags = pressed if down else released
     send_inputs([INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(0, 0, 0, flags, 0, 0))])
 
 

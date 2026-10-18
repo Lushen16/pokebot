@@ -179,6 +179,7 @@ class PokemonOffsets(OffsetSection):
     hp_max: Optional[OffsetEntry] = None
     level: Optional[OffsetEntry] = None
     status: Optional[OffsetEntry] = None
+    roster: Optional[OffsetEntry] = None
 
 
 @dataclass

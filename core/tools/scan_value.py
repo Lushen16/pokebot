@@ -68,7 +68,7 @@ def iter_regions(mem: MemoryReader):
     kernel32.VirtualQueryEx.restype = ctypes.c_size_t
 
     addr = 0
-    MAX_ADDR = 0x7FFFFFFFFFFF
+    MAX_ADDR = 0xFFFFFFFF if mem.pointer_size == 4 else 0x7FFFFFFFFFFF
 
     while addr < MAX_ADDR:
         mbi = MBI64()
@@ -76,14 +76,14 @@ def iter_regions(mem: MemoryReader):
             mem.handle, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)
         )
         if res == 0:
-            addr += 0x1000
-            continue
+            log.debug("VirtualQueryEx encerrou a enumeracao em 0x%X", addr)
+            break
 
         base = mbi.BaseAddress
         size = mbi.RegionSize
-        if size == 0:
-            addr += 0x1000
-            continue
+        if size == 0 or base + size <= addr:
+            log.warning("VirtualQueryEx retornou regiao sem progresso em 0x%X", addr)
+            break
 
         if (mbi.State == MEM_COMMIT
                 and not (mbi.Protect & PAGE_GUARD)

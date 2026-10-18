@@ -30,7 +30,7 @@ class HPResolverTests(unittest.TestCase):
         self.assertEqual(self.resolver.entries['player.hp']['steps'], [0])
         self.assertFalse(self.resolver.entries['player.hp']['deref'])
         self.assertEqual(self.resolver.resolve_entry('player.hp'), TARGET)
-        self.proc.read_ptr.assert_called_once_with(BASE + 0x3922260)
+        self.proc.read_ptr.assert_called_once_with(BASE + 0x3904D38)
 
     def test_hp_reads_correct_value(self):
         self.assertEqual(self.resolver.read_entry('player.hp'), 179)
@@ -57,7 +57,7 @@ class HPResolverTests(unittest.TestCase):
         self.resolver.entries['player.hp'].update(steps=[0], terminal=4, deref=True)
         self.proc.read_ptr.side_effect = [TARGET, TARGET+0x1000]
         self.assertEqual(self.resolver.resolve_entry('player.hp'), TARGET+0x1004)
-        self.assertEqual([c.args for c in self.proc.read_ptr.call_args_list], [(BASE+0x3922260,), (TARGET,)])
+        self.assertEqual([c.args for c in self.proc.read_ptr.call_args_list], [(BASE+0x3904D38,), (TARGET,)])
 
     def test_final_null_or_failed_pointer_blocks_value_read(self):
         for result in (0, None):
@@ -68,11 +68,11 @@ class HPResolverTests(unittest.TestCase):
     def test_final_deref_overflow_blocks_pointer_read(self):
         self.resolver.entries['player.hp']['terminal'] = 1 << 64
         self.assertIsNone(self.resolver.resolve_entry('player.hp'))
-        self.proc.read_ptr.assert_called_once_with(BASE+0x3922260)
+        self.proc.read_ptr.assert_called_once_with(BASE+0x3904D38)
 
     def test_hp_max_can_share_synthetic_base_with_hp(self):
         target = 0x21700020000
-        slot = BASE + 0x3922260
+        slot = BASE + 0x3904D38
         def read_pointer(address):
             self.assertEqual(address, slot)
             return target
