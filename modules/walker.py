@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
+
 from modules.base import AutomationModule
 
-logger = logging.getLogger("PokeBot.Walker")
+log = logging.getLogger("pokebot.modules.walker")
 
 VK_W = 0x57
 VK_A = 0x41
@@ -12,169 +15,184 @@ ALL_MOVEMENT_KEYS: Tuple[int, ...] = (VK_W, VK_A, VK_S, VK_D)
 
 
 class Walker(AutomationModule):
-    """
-    Módulo Cavebot / Walker baseado em coordenadas (X, Y, Z) e input contínuo WASD.
-    Utiliza `self.read()` e `self.bus` providos por `AutomationModule`.
-    """
+    """Módulo de movimentação do personagem tile a tile usando WASD, com gravação e loop de Hunt."""
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        memory = kwargs.pop("memory_reader", None)
-        offsets = kwargs.pop("offset_registry", None)
-        bus = kwargs.pop("input_bus", None)
-        if "bus" not in kwargs and bus is not None:
-            kwargs["bus"] = bus
+    def __init__(
+        self,
+        memory_reader: Any = None,
+        offset_registry: Any = None,
+        input_bus: Any = None,
+        poll_interval_sec: float = 0.05,
+        loop: bool = True,
+        record_min_distance: int = 1,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        memory = memory_reader if memory_reader is not None else kwargs.pop("memory", None)
+        offsets = offset_registry if offset_registry is not None else kwargs.pop("offsets", None)
+        bus = input_bus if input_bus is not None else kwargs.pop("bus", None)
 
-        if len(args) == 0:
-            super().__init__(memory=memory, offsets=offsets, name="walker", **kwargs)
-        else:
-            super().__init__(*args, **kwargs)
-
+        super().__init__(
+            memory=memory,
+            resolver=offsets,
+            bus=bus,
+            interval=poll_interval_sec,
+            name=kwargs.pop("name", "walker"),
+            **kwargs,
+        )
         self.waypoints: List[Dict[str, int]] = []
         self._pressed_keys: Set[int] = set()
+        self.loop: bool = loop
+        self.recording: bool = False
+        self.record_min_distance: int = max(1, int(record_min_distance))
+
+    def set_loop(self, enabled: bool) -> None:
+        """Ativa ou desativa a repetição contínua da rota."""
+        self.loop = bool(enabled)
 
     def add_waypoint(self, x: int, y: int, z: int) -> None:
-        """Adiciona um waypoint ao final da fila."""
-        waypoint = {"x": int(x), "y": int(y), "z": int(z)}
-        self.waypoints.append(waypoint)
-        logger.info("Waypoint adicionado: %s (Total na fila: %d)", waypoint, len(self.waypoints))
+        self.waypoints.append({"x": int(x), "y": int(y), "z": int(z)})
 
     def clear_waypoints(self) -> None:
-        """Limpa a fila de waypoints e solta todas as teclas de movimento."""
         self.waypoints.clear()
         self._release_all_keys()
-        logger.info("Fila de waypoints limpa.")
 
     def goto(self, x: int, y: int, z: int) -> None:
-        """Limpa a fila atual e define um único waypoint como destino imediato."""
-        self.clear_waypoints()
-        self.add_waypoint(x, y, z)
-        logger.info("Goto definido para (%d, %d, %d).", x, y, z)
+        self._release_all_keys()
+        self.waypoints = [{"x": int(x), "y": int(y), "z": int(z)}]
 
-    def read_player_position(self) -> Optional[Tuple[int, int, int]]:
+    def start_recording(self, clear_existing: bool = True) -> None:
+        """Inicia a gravação da Hunt, soltando teclas e capturando o tile inicial."""
+        self._release_all_keys()
+        if clear_existing:
+            self.waypoints.clear()
+        self.recording = True
+        self.record_step_if_moved()
+        log.info("Gravação de Hunt iniciada.")
+
+    def stop_recording(self) -> None:
+        """Finaliza a gravação da Hunt."""
+        self.recording = False
+        log.info("Gravação de Hunt finalizada com %d waypoints.", len(self.waypoints))
+
+    def record_step_if_moved(self) -> Optional[Dict[str, int]]:
         """
-        Lê (player.x, player.y, player.z) usando `self.read()` da classe base.
-        Retorna None e loga o erro se qualquer leitura falhar.
+        Lê a posição atual do jogador e adiciona à fila caso seja o primeiro ponto,
+        tenha mudado de andar (Z) ou tenha andado pelo menos `record_min_distance` tiles.
         """
-        try:
-            x = self.read("player.x")
-            y = self.read("player.y")
-            z = self.read("player.z")
-
-            if x is None or y is None or z is None:
-                logger.error(
-                    "Falha ao ler coordenadas do player (x=%s, y=%s, z=%s).",
-                    x,
-                    y,
-                    z,
-                )
-                return None
-
-            return (int(x), int(y), int(z))
-        except Exception as exc:
-            logger.exception("Exceção ao ler coordenadas do player: %s", exc)
+        if not self.recording:
             return None
 
-    def _hold_key(self, vk_code: int) -> None:
-        """Segura a tecla via self.bus.key_down caso ainda não esteja pressionada."""
-        if vk_code not in self._pressed_keys:
-            try:
-                self.bus.key_down(vk_code)
-                self._pressed_keys.add(vk_code)
-            except Exception as exc:
-                logger.error("Erro ao executar key_down(0x%X): %s", vk_code, exc)
+        pos = self.read_player_position()
+        if pos is None:
+            return None
 
-    def _release_key(self, vk_code: int) -> None:
-        """Solta a tecla via self.bus.key_up caso esteja pressionada."""
-        if vk_code in self._pressed_keys:
-            try:
-                self.bus.key_up(vk_code)
-            except Exception as exc:
-                logger.error("Erro ao executar key_up(0x%X): %s", vk_code, exc)
-            finally:
-                self._pressed_keys.discard(vk_code)
+        curr_x, curr_y, curr_z = pos
+        if not self.waypoints:
+            wp = {"x": curr_x, "y": curr_y, "z": curr_z}
+            self.waypoints.append(wp)
+            return wp
 
-    def _release_all_keys(self) -> None:
-        """Garante que W, A, S e D sejam todas soltas no InputBus."""
-        for vk_code in ALL_MOVEMENT_KEYS:
-            try:
-                self.bus.key_up(vk_code)
-            except Exception as exc:
-                logger.error("Erro ao liberar tecla 0x%X: %s", vk_code, exc)
-        self._pressed_keys.clear()
+        last = self.waypoints[-1]
+        dist_x = abs(curr_x - last["x"])
+        dist_y = abs(curr_y - last["y"])
+        manhattan_dist = dist_x + dist_y
 
-    def _apply_axis_movement(self, dx: int, dy: int) -> None:
-        """
-        Controle de Teclas (WASD) por eixo:
-        - Se dx > 0: solta A e segura D. Se dx < 0: solta D e segura A. Se dx == 0: solta A e D.
-        - Se dy > 0: solta W e segura S. Se dy < 0: solta S e segura W. Se dy == 0: solta W e S.
-        """
-        if dx > 0:
-            self._release_key(VK_A)
-            self._hold_key(VK_D)
-        elif dx < 0:
-            self._release_key(VK_D)
-            self._hold_key(VK_A)
-        else:
-            self._release_key(VK_A)
-            self._release_key(VK_D)
+        if curr_z != last["z"] or manhattan_dist >= self.record_min_distance:
+            wp = {"x": curr_x, "y": curr_y, "z": curr_z}
+            self.waypoints.append(wp)
+            return wp
 
-        if dy > 0:
-            self._release_key(VK_W)
-            self._hold_key(VK_S)
-        elif dy < 0:
-            self._release_key(VK_S)
-            self._hold_key(VK_W)
-        else:
-            self._release_key(VK_W)
-            self._release_key(VK_S)
+        return None
+
+    def read_player_position(self) -> Optional[Tuple[int, int, int]]:
+        x = self.read("player.x")
+        y = self.read("player.y")
+        z = self.read("player.z")
+        if x is None or y is None or z is None:
+            return None
+        return (int(x), int(y), int(z))
 
     def tick(self) -> None:
-        """Loop principal de locomoção executado a cada ciclo da thread."""
+        if self.recording:
+            self._release_all_keys()
+            self.record_step_if_moved()
+            return
+
+        if not self.waypoints:
+            self._release_all_keys()
+            return
+
         pos = self.read_player_position()
         if pos is None:
             self._release_all_keys()
             return
 
-        if not self.waypoints:
-            if self._pressed_keys:
-                self._release_all_keys()
-            return
-
-        player_x, player_y, player_z = pos
+        curr_x, curr_y, curr_z = pos
         target = self.waypoints[0]
+        tx, ty, tz = target["x"], target["y"], target["z"]
 
-        if player_z != target["z"]:
-            logger.warning(
-                "Andar diferente do waypoint alvo (player.z=%d, target.z=%d). Soltando teclas.",
-                player_z,
-                target["z"],
-            )
+        if curr_z != tz:
+            skipped = self.waypoints.pop(0)
+            if self.loop:
+                self.waypoints.append(skipped)
             self._release_all_keys()
             return
 
-        dx = target["x"] - player_x
-        dy = target["y"] - player_y
+        dx = tx - curr_x
+        dy = ty - curr_y
 
-        # Chegada exata no tile (dx == 0 e dy == 0)
+        # REGRA CRÍTICA: Chegada EXATA no tile (dx == 0 e dy == 0)
         if dx == 0 and dy == 0:
             self._release_all_keys()
             reached = self.waypoints.pop(0)
-            logger.info(
-                "Waypoint alcançado: %s. Restantes na fila: %d",
-                reached,
-                len(self.waypoints),
-            )
+            if self.loop:
+                self.waypoints.append(reached)
             return
 
         self._apply_axis_movement(dx, dy)
 
-    def teardown(self) -> None:
-        """Garante que todas as teclas (W, A, S, D) sejam soltas ao parar o módulo."""
-        self._release_all_keys()
-        logger.info("Teardown do Walker concluído: teclas W, A, S, D liberadas.")
+    def _apply_axis_movement(self, dx: int, dy: int) -> None:
+        desired_x: Optional[int] = None
+        if dx > 0:
+            desired_x = VK_D
+        elif dx < 0:
+            desired_x = VK_A
 
-    def stop(self, timeout: float = 5.0) -> bool:
-        """Interrompe o módulo e garante a liberação imediata das teclas."""
-        res = super().stop(timeout=timeout)
-        self.teardown()
-        return res
+        for vk in (VK_A, VK_D):
+            if vk != desired_x and vk in self._pressed_keys:
+                self.bus.key_up(vk)
+                self._pressed_keys.discard(vk)
+
+        if desired_x is not None and desired_x not in self._pressed_keys:
+            self.bus.key_down(desired_x)
+            self._pressed_keys.add(desired_x)
+
+        desired_y: Optional[int] = None
+        if dy > 0:
+            desired_y = VK_S
+        elif dy < 0:
+            desired_y = VK_W
+
+        for vk in (VK_W, VK_S):
+            if vk != desired_y and vk in self._pressed_keys:
+                self.bus.key_up(vk)
+                self._pressed_keys.discard(vk)
+
+        if desired_y is not None and desired_y not in self._pressed_keys:
+            self.bus.key_down(desired_y)
+            self._pressed_keys.add(desired_y)
+
+    def _release_all_keys(self) -> None:
+        for vk in ALL_MOVEMENT_KEYS:
+            if vk in self._pressed_keys:
+                self.bus.key_up(vk)
+                self._pressed_keys.discard(vk)
+
+    def teardown(self) -> None:
+        self._release_all_keys()
+
+    def stop(self, *args: Any, **kwargs: Any) -> Any:
+        self.recording = False
+        self._release_all_keys()
+        return super().stop(*args, **kwargs)

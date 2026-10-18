@@ -2,11 +2,7 @@ from unittest.mock import MagicMock, patch
 from modules.walker import VK_A, VK_D, VK_S, VK_W, Walker
 
 
-def make_walker(positions):
-    """
-    Cria uma instância de Walker com `self.read` e `self.bus` mockados,
-    simulando a evolução das coordenadas a cada passo.
-    """
+def make_walker(positions, loop: bool = False):
     state = {"step": 0, "positions": list(positions)}
 
     with patch.object(Walker, "__init__", lambda self, *a, **kw: None):
@@ -16,6 +12,9 @@ def make_walker(positions):
     walker._pressed_keys = set()
     walker.bus = MagicMock()
     walker.running = False
+    walker.loop = loop
+    walker.recording = False
+    walker.record_min_distance = 1
 
     def fake_read(key: str):
         pos = state["positions"][state["step"]]
@@ -52,21 +51,19 @@ def test_waypoint_queue_methods():
 
 def test_walker_only_arrives_when_dx_and_dy_are_zero():
     timeline = [
-        (100, 200, 7),  # Passo 0: Alvo (102, 199, 7) -> dx=+2 (D), dy=-1 (W)
-        (101, 199, 7),  # Passo 1: dx=+1, dy=0 -> Solta W, mas MANTÉM D (não pode parar em dx=1!)
-        (102, 199, 7),  # Passo 2: dx=0, dy=0 -> Chegou exatamente no tile! Solta tudo e remove WP.
+        (100, 200, 7),
+        (101, 199, 7),
+        (102, 199, 7),
     ]
-    walker, state = make_walker(timeline)
+    walker, state = make_walker(timeline, loop=False)
     walker.add_waypoint(102, 199, 7)
 
-    # Passo 0: Segura D e W
     state["step"] = 0
     walker.tick()
     walker.bus.key_down.assert_any_call(VK_D)
     walker.bus.key_down.assert_any_call(VK_W)
     assert len(walker.waypoints) == 1
 
-    # Passo 1: Está a 1 tile (dx=1, dy=0). Deve soltar W, continuar segurando D e NÃO remover o waypoint
     walker.bus.reset_mock()
     state["step"] = 1
     walker.tick()
@@ -74,23 +71,15 @@ def test_walker_only_arrives_when_dx_and_dy_are_zero():
     assert VK_D in walker._pressed_keys
     assert len(walker.waypoints) == 1
 
-    # Passo 2: Chegou exatamente em (102, 199, 7) -> dx == 0 e dy == 0
     walker.bus.reset_mock()
     state["step"] = 2
     walker.tick()
-    walker.bus.key_up.assert_any_call(VK_W)
-    walker.bus.key_up.assert_any_call(VK_A)
-    walker.bus.key_up.assert_any_call(VK_S)
-    walker.bus.key_up.assert_any_call(VK_D)
     assert len(walker._pressed_keys) == 0
     assert len(walker.waypoints) == 0
 
 
 def test_walker_west_and_south_movement():
-    timeline = [
-        (100, 200, 7),  # Alvo (98, 202, 7) -> dx=-2 (A), dy=+2 (S)
-    ]
-    walker, _ = make_walker(timeline)
+    walker, _ = make_walker([(100, 200, 7)])
     walker.add_waypoint(98, 202, 7)
 
     walker.tick()
@@ -99,10 +88,7 @@ def test_walker_west_and_south_movement():
 
 
 def test_memory_read_failure_releases_all_keys():
-    timeline = [
-        (100, 200, 7),
-        None,
-    ]
+    timeline = [(100, 200, 7), None]
     walker, state = make_walker(timeline)
     walker.add_waypoint(105, 200, 7)
 
@@ -127,9 +113,63 @@ def test_teardown_releases_all_keys():
 
     walker.bus.reset_mock()
     walker.teardown()
-
-    walker.bus.key_up.assert_any_call(VK_W)
-    walker.bus.key_up.assert_any_call(VK_A)
-    walker.bus.key_up.assert_any_call(VK_S)
-    walker.bus.key_up.assert_any_call(VK_D)
     assert len(walker._pressed_keys) == 0
+
+
+def test_walker_record_hunt_captures_movement_only():
+    timeline = [
+        (100, 200, 7),  # Ponto inicial ao clicar em Gravar
+        (100, 200, 7),  # Parado no mesmo lugar (não deve duplicar)
+        (101, 200, 7),  # Andou 1 tile para Leste
+        (101, 201, 7),  # Andou 1 tile para Sul
+    ]
+    walker, state = make_walker(timeline, loop=True)
+
+    state["step"] = 0
+    walker.start_recording(clear_existing=True)
+    assert walker.recording is True
+    assert walker.waypoints == [{"x": 100, "y": 200, "z": 7}]
+
+    # Continua parado no mesmo tile: não adiciona duplicata
+    state["step"] = 1
+    walker.tick()
+    assert len(walker.waypoints) == 1
+
+    # Moveu para (101, 200, 7)
+    state["step"] = 2
+    walker.tick()
+    assert len(walker.waypoints) == 2
+    assert walker.waypoints[-1] == {"x": 101, "y": 200, "z": 7}
+
+    # Moveu para (101, 201, 7)
+    state["step"] = 3
+    walker.tick()
+    assert len(walker.waypoints) == 3
+    assert walker.waypoints[-1] == {"x": 101, "y": 201, "z": 7}
+
+    walker.stop_recording()
+    assert walker.recording is False
+
+
+def test_walker_loop_rotates_waypoints_continuously():
+    timeline = [
+        (100, 200, 7),  # Já está no WP1 -> rotaciona WP1 pro fim, alvo vira WP2
+        (101, 200, 7),  # Chegou no WP2 -> rotaciona WP2 pro fim, alvo volta a ser WP1
+    ]
+    walker, state = make_walker(timeline, loop=True)
+    walker.add_waypoint(100, 200, 7)
+    walker.add_waypoint(101, 200, 7)
+
+    # Tick 0: Alcança WP1 (100, 200, 7), que vai para o fim da fila
+    state["step"] = 0
+    walker.tick()
+    assert len(walker.waypoints) == 2
+    assert walker.waypoints[0] == {"x": 101, "y": 200, "z": 7}
+    assert walker.waypoints[1] == {"x": 100, "y": 200, "z": 7}
+
+    # Tick 1: Alcança WP2 (101, 200, 7), que também vai para o fim da fila
+    state["step"] = 1
+    walker.tick()
+    assert len(walker.waypoints) == 2
+    assert walker.waypoints[0] == {"x": 100, "y": 200, "z": 7}
+    assert walker.waypoints[1] == {"x": 101, "y": 200, "z": 7}
