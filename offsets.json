@@ -70,38 +70,41 @@
     },
     "player.x": {
       "module": "PokeAlliance_dx.exe",
-      "base_rva": 59867008,
+      "base_rva": 59788456,
       "steps": [
-        0
+        80,
+        8
       ],
       "terminal": 40,
       "type": "int32",
       "verified": true,
-      "note": "X = read_ptr(PokeAlliance_dx.exe + 0x3917F80) + 0x28. Alt v3.1.2 chain: base_rva=59788456 (0x3904CA8), steps=[80, 8], terminal=40.",
+      "note": "2026-10-18: cadeia alternativa documentada v3.1.2, base 0x3904CA8, steps [0x50, 0x08]. Leitura direta no PID 18352: X=3313 Y=2051 Z=7 (Z & 255); cadeia antiga 0x3917F80 nula. source verified_ce herdado da calibracao anterior; confirmacao visual e reinicio pendentes.",
       "source": "verified_ce"
     },
     "player.y": {
       "module": "PokeAlliance_dx.exe",
-      "base_rva": 59867008,
+      "base_rva": 59788456,
       "steps": [
-        0
+        80,
+        8
       ],
       "terminal": 44,
       "type": "int32",
       "verified": true,
-      "note": "Y = read_ptr(PokeAlliance_dx.exe + 0x3917F80) + 0x2C. Alt v3.1.2 chain: base_rva=59788456 (0x3904CA8), steps=[80, 8], terminal=44.",
+      "note": "2026-10-18: cadeia alternativa documentada v3.1.2, base 0x3904CA8, steps [0x50, 0x08]. Leitura direta no PID 18352: X=3313 Y=2051 Z=7 (Z & 255); cadeia antiga 0x3917F80 nula. source verified_ce herdado da calibracao anterior; confirmacao visual e reinicio pendentes.",
       "source": "verified_ce"
     },
     "player.z": {
       "module": "PokeAlliance_dx.exe",
-      "base_rva": 59867008,
+      "base_rva": 59788456,
       "steps": [
-        0
+        80,
+        8
       ],
       "terminal": 48,
       "type": "int32",
       "verified": true,
-      "note": "Z = read_ptr(PokeAlliance_dx.exe + 0x3917F80) + 0x30. Alt v3.1.2 chain: base_rva=59788456 (0x3904CA8), steps=[80, 8], terminal=48.",
+      "note": "2026-10-18: cadeia alternativa documentada v3.1.2, base 0x3904CA8, steps [0x50, 0x08]. Leitura direta no PID 18352: X=3313 Y=2051 Z=7 (Z & 255); cadeia antiga 0x3917F80 nula. source verified_ce herdado da calibracao anterior; confirmacao visual e reinicio pendentes.",
       "source": "verified_ce",
       "mask": 255,
       "shift": 0

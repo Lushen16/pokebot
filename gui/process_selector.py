@@ -34,6 +34,14 @@ class PROCESSENTRY32W(ctypes.Structure):
 def enumerate_windows_processes() -> List[Tuple[str, int]]:
     """Enumera todos os processos do Windows ativos usando Toolhelp32Snapshot."""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wt.HANDLE
+    kernel32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32FirstW.restype = wt.BOOL
+    kernel32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = wt.BOOL
+    kernel32.CloseHandle.argtypes = [wt.HANDLE]
+    kernel32.CloseHandle.restype = wt.BOOL
     snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     if snap in (None, 0, -1, ctypes.c_void_p(-1).value):
         return []

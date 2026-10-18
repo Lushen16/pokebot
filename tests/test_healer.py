@@ -149,7 +149,8 @@ def test_existing_config_preserves_hotkeys_and_uses_delay_as_cooldown(make_heale
     healer.tick()
     clock.now = 0.799
     healer.tick()
-    assert bus.press_key.call_count == 3
+    # Puxar (1), skill (1), Revive Shift+F (2), retornar (1).
+    assert bus.press_key.call_count == 5
 
 
 def test_gui_config_updates_are_observed_next_tick(make_healer):

@@ -196,6 +196,43 @@ class PokemonHealerSelector(QWidget):
         self.timer.timeout.connect(self.refresh)
         self.timer.start(1500)
 
+    def simplify_for_dashboard(self):
+        from ui.combat_tab import CollapsibleSection
+        layout = self.layout()
+        self.advanced = CollapsibleSection("Avançado · tempos e revive", self)
+        advanced_form = QFormLayout()
+        self.advanced.content_layout.addLayout(advanced_form)
+        core_widgets = (self.pokemon_combo, self.return_combo, self.skill_combo, self.spin_hp_thresh,
+                        self.btn_test_healer, self.status)
+        rows = []
+        while layout.rowCount():
+            rows.append(layout.takeRow(0))
+        for row in rows:
+            label = row.labelItem.widget() if row.labelItem is not None else None
+            field = row.fieldItem.widget() if row.fieldItem is not None else None
+            field_layout = row.fieldItem.layout() if row.fieldItem is not None else None
+            target = layout if field in core_widgets else advanced_form
+            if label is not None:
+                target.addRow(label, field if field is not None else field_layout)
+            else:
+                target.addRow(field if field is not None else field_layout)
+        advanced_form.addRow("Reset após revive:", self.reset_delay)
+        layout.addRow(self.advanced)
+
+        from gui.icons import set_button_icon
+        set_button_icon(self.btn_test_healer, "heart", size=22)
+        set_button_icon(self.btn_save_activate, "save")
+        set_button_icon(self.detect_button, "refresh")
+        self.btn_save_activate.setText("Salvar e ativar Healer")
+        self.detect_button.setText("Detectar Mochila")
+        self.btn_test_healer.setText("Testar Healer")
+        self.btn_test_healer.setEnabled(False)
+        self.btn_test_healer.setObjectName("primary")
+        self.btn_test_healer.setStyleSheet("")
+        self.status.setText("Escolha os slots de cura e caça. Nomes aparecem quando detectados.")
+        self.client_combo.hide()
+        self.btn_select_client.hide()
+
     def _clear_revive(self):
         idx = self.revive_combo.findText("Nenhum")
         if idx >= 0:

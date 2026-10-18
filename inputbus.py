@@ -18,6 +18,7 @@ import win32process
 
 from context import get_context
 from wininput import send_scancode, vk_to_scancode, send_mouse_button, sendinput_selftest
+from wininput import text_key_codes, send_virtual_keys
 
 log = logging.getLogger("pokebot.inputbus")
 
@@ -29,6 +30,7 @@ class InputType(Enum):
     KEY_COMBO = "key_combo"  # modifier(s) + key with hold time
     MOUSE_CLICK = "mouse_click"
     MOUSE_MOVE = "mouse_move"
+    TEXT = "text"
 
 
 @dataclass
@@ -50,6 +52,8 @@ class InputRequest:
     # module name for debugging
     module: str = "unknown"
     button: str = "left"
+    text: str = ""
+    cancel_event: Optional[threading.Event] = None
 
 
 class InputBus:
@@ -69,6 +73,8 @@ class InputBus:
         self._hwnd = None
         self._hwnd_lock = threading.Lock()
         self._focus_blocked = False
+        self._text_cancellations: dict[str, threading.Event] = {}
+        self._held_scancodes: set[int] = set()
 
     def start(self):
         if self._running:
@@ -80,6 +86,9 @@ class InputBus:
 
     def stop(self):
         self._running = False
+        with self._lock:
+            for event in self._text_cancellations.values():
+                event.set()
         if self._worker:
             self._worker.join(timeout=2.0)
             self._worker = None
@@ -88,7 +97,7 @@ class InputBus:
     def submit(self, req: InputRequest) -> bool:
         """Enqueue an input request. Returns False if queue full."""
         max_q = self._ctx.get("safety_limits", "input_bus_queue_max", default=32)
-        if self._queue.qsize() >= max_q:
+        if req.type != InputType.KEY_UP and self._queue.qsize() >= max_q:
             log.warning("InputBus queue full (%d), dropping request from %s", max_q, req.module)
             return False
         with self._lock:
@@ -126,6 +135,48 @@ class InputBus:
             priority=priority,
             module=module,
         ))
+
+    def send_text(self, text: str, priority: int = 10, module: str = "unknown") -> bool:
+        if not isinstance(text, str) or not text or len(text) > 1024 or not text.isprintable():
+            raise ValueError("Texto deve ter de 1 a 1024 caracteres imprimíveis")
+        with self._lock:
+            event = self._text_cancellations.get(module)
+            if event is None or event.is_set():
+                event = threading.Event()
+                self._text_cancellations[module] = event
+        return self.submit(InputRequest(type=InputType.TEXT, text=text, priority=priority,
+                                        module=module, cancel_event=event))
+
+    def cancel_text(self, module: str) -> None:
+        with self._lock:
+            event = self._text_cancellations.get(module)
+            if event is not None:
+                event.set()
+
+    def _execute_text(self, req: InputRequest) -> bool:
+        event = req.cancel_event or threading.Event()
+        hwnd = self._get_hwnd()
+        thread_id, _ = win32process.GetWindowThreadProcessId(hwnd)
+        strokes = text_key_codes(req.text, thread_id)
+        if event.is_set() or self._ctx.is_stopped() or win32gui.GetForegroundWindow() != hwnd:
+            return False
+        send_virtual_keys((0x0D,))
+        chat_open = True
+        try:
+            for keys in strokes:
+                if event.wait(0.02) or self._ctx.is_stopped():
+                    return False
+                if win32gui.GetForegroundWindow() != hwnd:
+                    return False
+                send_virtual_keys(keys)
+            if event.wait(0.02) or self._ctx.is_stopped() or win32gui.GetForegroundWindow() != hwnd:
+                return False
+            send_virtual_keys((0x0D,))
+            chat_open = False
+            return True
+        finally:
+            if chat_open and win32gui.GetForegroundWindow() == hwnd:
+                send_virtual_keys((0x1B,))
 
     def key_up(self, code: int, priority: int = 10, module: str = "unknown") -> bool:
         return self.submit(InputRequest(
@@ -256,7 +307,9 @@ class InputBus:
             time.sleep(wait)
 
         try:
-            if not self._focus_client():
+            if req.cancel_event is not None and req.cancel_event.is_set():
+                return False
+            if req.type != InputType.KEY_UP and not self._focus_client():
                 if not self._focus_blocked:
                     log.warning("Input bloqueado: janela do PID selecionado nao esta em foco. Clique no jogo para continuar.")
                 self._focus_blocked = True
@@ -283,9 +336,13 @@ class InputBus:
             elif req.type == InputType.KEY_DOWN:
                 sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
                 self._send_scancode(sc, True)
+                self._held_scancodes.add(sc)
             elif req.type == InputType.KEY_UP:
                 sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
                 self._send_scancode(sc, False)
+                self._held_scancodes.discard(sc)
+            elif req.type == InputType.TEXT:
+                return self._execute_text(req)
             elif req.type == InputType.MOUSE_CLICK:
                 hwnd = self._get_hwnd()
                 if hwnd:
@@ -305,6 +362,7 @@ class InputBus:
                 log.warning("unknown input type: %s", req.type)
         except Exception as exc:
             log.error("input execution failed: %s", exc)
+            return False
         finally:
             self._last_input_time = time.monotonic()
             if req.callback:
@@ -314,16 +372,24 @@ class InputBus:
                     pass
 
     def _run(self):
-        while self._running:
-            try:
-                _, _, req = self._queue.get(timeout=0.1)
-                if self._ctx.is_stopped():
-                    break
-                self._execute(req)
-            except queue.Empty:
-                continue
-            except Exception as exc:
-                log.exception("InputBus worker error: %s", exc)
+        try:
+            while self._running:
+                try:
+                    _, _, req = self._queue.get(timeout=0.1)
+                    if self._ctx.is_stopped():
+                        break
+                    self._execute(req)
+                except queue.Empty:
+                    continue
+                except Exception as exc:
+                    log.exception("InputBus worker error: %s", exc)
+        finally:
+            for scancode in tuple(self._held_scancodes):
+                try:
+                    self._send_scancode(scancode, False)
+                except Exception:
+                    log.exception("Falha ao soltar tecla no encerramento")
+                self._held_scancodes.discard(scancode)
 
 
 # Singleton

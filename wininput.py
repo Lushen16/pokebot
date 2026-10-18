@@ -92,6 +92,39 @@ def vk_to_scancode(vk):
     return _user32().MapVirtualKeyW(vk, 4)
 
 
+def text_key_codes(text, thread_id=0):
+    user32 = _user32()
+    user32.GetKeyboardLayout.argtypes = [DWORD]
+    user32.GetKeyboardLayout.restype = ctypes.c_void_p
+    user32.VkKeyScanExW.argtypes = [ctypes.c_wchar, ctypes.c_void_p]
+    user32.VkKeyScanExW.restype = ctypes.c_short
+    user32.VkKeyScanW.argtypes = [ctypes.c_wchar]
+    user32.VkKeyScanW.restype = ctypes.c_short
+    user32.GetKeyState.argtypes = [ctypes.c_int]
+    user32.GetKeyState.restype = ctypes.c_short
+    layout = user32.GetKeyboardLayout(thread_id)
+    caps_lock = bool(user32.GetKeyState(0x14) & 1)
+    strokes = []
+    for character in text:
+        mapped = (user32.VkKeyScanExW(character, layout) if thread_id
+                  else user32.VkKeyScanW(character))
+        if mapped == -1 or ((mapped >> 8) & ~7):
+            raise ValueError(f"Caractere sem VK no layout selecionado: {character!r}")
+        modifiers = (mapped >> 8) & 7
+        if caps_lock and character.isascii() and character.isalpha():
+            modifiers ^= 1
+        keys = tuple(code for mask, code in ((1, 0x10), (2, 0x11), (4, 0x12))
+                     if modifiers & mask) + (mapped & 0xFF,)
+        strokes.append(keys)
+    return strokes
+
+
+def send_virtual_keys(codes):
+    events = [keyboard_event(vk=code) for code in codes]
+    events.extend(keyboard_event(vk=code, flags=KEYEVENTF_KEYUP) for code in reversed(codes))
+    send_inputs(events)
+
+
 def send_mouse_button(down, button="left"):
     if button not in ("left", "right"):
         raise ValueError("Mouse button must be left or right")

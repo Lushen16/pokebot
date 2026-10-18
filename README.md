@@ -68,9 +68,88 @@ campo durante trocas, sem Pokémon ativo e após reiniciar o cliente.
 Um campo pode não existir como índice simples, ou mudar de endereço ao trocar.
 O limite de candidatos interrompe explicitamente o scan, sem truncar resultados.
 
+## Walker: ações e gravação de rotas
+
+Cada waypoint contém x, y, z, action e param. A aba Cavebot oferece Walk,
+Wait (milissegundos), Say (texto), Safe Spot, BOX e Stair. As três últimas
+ações são marcadores passivos, sem automação especial nesta etapa.
+
+Walk aceita uma margem de chegada configurável de 0 a 2 SQM por eixo
+(padrão 1), sempre no mesmo andar. Todas as demais ações exigem o tile exato.
+A tolerância é salva no perfil da Hunt; perfis antigos usam o padrão 1.
+Ao concluir cada waypoint, o Walker libera as teclas e faz uma pausa aleatória
+de 50 a 200 ms, controlada por relógio monotônico sem bloquear a thread.
+Parar, limpar ou substituir a rota cancela a pausa pendente. Essa variação
+não garante prevenção de detecção por sistemas de anti-cheat.
+
+Wait usa uma máquina de estados IDLE/MOVING/WAITING e relógio monotônico,
+sem sleep no tick. O botão Parar solicita encerramento sem join na GUI.
+Say enfileira Enter, texto via VK/SendInput e Enter, sem clipboard. Comece
+com o chat fechado. O retorno true indica aceitação na fila, não confirmação
+da mensagem pelo jogo.
+
+A gravação confirma posições estáveis por 300 ms, com relógio monotônico,
+e usa intervalo padrão de 3 SQM entre posições confirmadas. Pare por pelo
+menos 300 ms nos pontos e curvas que deseja gravar; amostras transitórias
+da diagonal são descartadas. Finalizar gravação preserva somente posições
+confirmadas. A execução alinha X primeiro, solta A/D e então alinha Y;
+não envia duas direções simultaneamente e não substitui um pathfinder.
+Iniciar no Mais Próximo
+rotaciona a rota sem perder pontos; considera apenas o andar atual.
+Detalhes de ownership, threads e testes: [contrato Qt](docs/QT_CONTRACT.md).
+
+### Dashboard e Hunts configuradas
+
+Selecione o processo no cabeçalho fixo da janela (disponível em todas as abas). A conexão e a leitura de
+HP/X/Y/Z acontecem em background, sem ligar os módulos nem enviar teclas.
+O botão LIGAR BOT / DESLIGAR BOT controla a automação; desligar mantém a
+leitura ativa. Falhas de posição removem valores antigos do painel e mostram
+Atualizando, sem desligar a rota por uma única amostra inválida. O Walker mantém
+a tecla atual por até 500 ms ou dez ticks inválidos; no décimo primeiro tick,
+ou ao atingir 500 ms, libera as teclas. A rota fica intacta e retoma a partir
+da próxima posição válida. Parada manual e falhas de HP continuam imediatas.
+X/Y aceitam 0 a 10000 e Z aceita 0 a 15; o teto XY é conservador e centralizado
+em core/position.py, não uma medição do limite real do mapa. O nome do
+personagem aparece como Não calibrado enquanto
+não houver um leitor de nome validado; nenhum nome é inferido dos offsets XYZ.
+
+Na aba Cavebot, Salvar Nova Hunt grava waypoints, Loop e configuração do
+Healer em hunts.json, ao lado de config.json. Carregar Hunt restaura esses
+valores sem iniciar a rota. Pare a rota/gravação antes de trocar de perfil.
+O arquivo é criado no primeiro salvamento, escrito atomicamente e mantido
+fora do Git. Erros de JSON ou disco são exibidos sem sobrescrever o arquivo
+anterior. A gravação Wait/Say preserva suas ações e parâmetros.
+
 ## Módulos
 - **Engine**: Loop principal e processamento assíncrono.
 - **Memory**: Leitura de estruturas PE, offsets de memória, coordenadas (X, Y, Z) e status de vida (HP / HP Max).
 - **Navigator**: Navegação por waypoints e desvio de obstáculos.
 - **Modules**: Healer, Auto Target, Auto Catch, Cavebot, Alarms e Auto Food.
 - **GUI**: Interface gráfica integrada.
+
+### Interface e controles
+
+O tema escuro é definido em gui/style.qss. O cabeçalho reúne a lista de
+processos, Atualizar Processos e LIGAR/DESLIGAR BOT. Atualizar a lista não
+anexa o cliente; escolher um processo inicia apenas a leitura de memória.
+Dashboard reúne personagem, HP visual, XYZ, perfil, estado do Healer/Loop e
+as últimas cinco mensagens. Os botões de executar/parar rota ficam no Dashboard.
+
+Combate exibe Pokémon de Cura, Pokémon de Caça, Skill de Cura e limite de HP.
+Tempos e revive ficam em Avançado; comida e captura em outra seção recolhida.
+O teste de cura exige memória válida e executa uma sequência real de teclas.
+Cavebot usa tabela de waypoints somente leitura e permite salvar, carregar e
+deletar hunts com confirmação. Deletar o perfil preserva a rota atual.
+
+### Ícones e Power UI
+
+Instale as dependências visuais com `python -m pip install -r requirements.txt`. A interface usa ícones
+FontAwesome do QtAwesome nas abas, controles de rota, perfis e gravação. O
+helper gui/icons.py mantém SVGs locais para falhas de importação ou de fontes,
+sem downloads de imagens em runtime. Os rótulos continuam visíveis sem ícones.
+
+O botão mestre usa verde vibrante para iniciar e vermelho para parar. O brilho
+fica ativo apenas quando o botão está disponível para iniciar. A barra de HP é
+verde acima de 60%, amarela de 20% até 60% e vermelha abaixo de 20%; uma leitura
+inválida limpa a barra e o percentual. Selecionar o processo continua iniciando
+somente a leitura de memória, sem ligar os módulos.

@@ -76,8 +76,13 @@ o array acima é sempre a ordem de execução, da raiz até o valor.
 `source` e obrigatorio: `assumed`, `verified_ce` ou `reversed_disasm`.
 X/Y/Z usam `int32`; Z aplica `mask: 255`, `shift: 0`.
 Esses três campos foram marcados como verificados conforme o relato do usuário.
-X/Y/Z usam `steps: [0]`: `read_ptr(module_base + base_rva) + terminal`,
-correspondendo à cadeia mostrada no CE. `OK` no validador significa que as leituras
+X/Y/Z usam base RVA `0x3904CA8`, `steps: [0x50, 0x08]` e terminais
+`0x28`, `0x2C`, `0x30`: `read_ptr(read_ptr(module_base + base_rva) + 0x50) + 0x08 + terminal`.
+Em 18/10/2026, a cadeia antiga `0x3917F80` estava nula no PID 18352;
+a cadeia alternativa já documentada retornou X=3313, Y=2051, Z=7 por leitura
+direta, sem enviar teclas. A origem `verified_ce` é herdada da calibração anterior;
+confirmação visual e validação após reiniciar o cliente ainda estão pendentes.
+`OK` no validador significa que as leituras
 terminaram, não que os números representam a posição correta.
 `mask` aceita inteiro não negativo de 32 bits, somente para tipos inteiros.
 `shift` aceita 0 a 31 e exige `mask`; quando omitido, assume zero.

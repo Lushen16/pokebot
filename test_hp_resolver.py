@@ -23,7 +23,7 @@ class HPResolverTests(unittest.TestCase):
     def test_x_no_deref(self):
         # Direct-address fixture; calibrated XYZ chains remain unchanged.
         self.resolver.entries['player.x']['steps'] = []
-        self.assertEqual(self.resolver.resolve_entry('player.x'), BASE + 0x3917F80 + 0x28)
+        self.assertEqual(self.resolver.resolve_entry('player.x'), BASE + 0x3904CA8 + 0x28)
         self.proc.read_ptr.assert_not_called()
 
     def test_hp_with_zero_step(self):
@@ -42,8 +42,10 @@ class HPResolverTests(unittest.TestCase):
                 self.proc.read_ptr.reset_mock()
                 entry = self.resolver.entries['player.'+axis]
                 self.assertFalse(entry.get('deref', False))
-                self.assertEqual(self.resolver.resolve_entry('player.'+axis), TARGET+terminal)
-                self.proc.read_ptr.assert_called_once_with(BASE+0x3917F80)
+                self.assertEqual(self.resolver.resolve_entry('player.'+axis), TARGET+0x08+terminal)
+                self.assertEqual([call.args for call in self.proc.read_ptr.call_args_list], [
+                    (BASE+0x3904CA8,), (TARGET+0x50,),
+                ])
         self.proc.read_value.return_value = 0x0b220006
         self.assertEqual(self.resolver.read_entry('player.z'), 6)
 

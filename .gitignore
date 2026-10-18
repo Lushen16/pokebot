@@ -36,3 +36,5 @@ pokemon_candidates.json
 *-output.txt
 *-console.txt
 backup_ponteiros/evidencias/
+hunts.json
+.hunts-*.tmp
