@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from memory import Process, Resolver
 import validate_position
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class PokemonHPTests(unittest.TestCase):

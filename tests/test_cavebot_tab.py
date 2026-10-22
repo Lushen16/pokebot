@@ -18,7 +18,7 @@ from ui.cavebot_tab import CavebotTab
 @pytest.fixture
 def cavebot():
     app = QApplication.instance() or QApplication([])
-    walker = Walker(input_bus=MagicMock(), loop=False, record_stable_ms=0)
+    walker = Walker(input_bus=MagicMock(), loop=False)
     walker.read_player_position = MagicMock(return_value=(100, 200, 7))
     tab = CavebotTab(walker)
     yield app, tab, walker
@@ -29,11 +29,102 @@ def cavebot():
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
+def test_route_editor_defaults_to_compact_view_without_changing_route(cavebot):
+    _, tab, walker = cavebot
+    original = walker.route_snapshot()
+    assert not tab.advanced_section.toggle.isChecked()
+    assert tab.advanced_section.content.isHidden()
+    assert tab.table_waypoints.isColumnHidden(3)
+    tab.chk_show_floor.setChecked(True)
+    assert not tab.table_waypoints.isColumnHidden(3)
+    tab.advanced_section.toggle.setChecked(True)
+    assert not tab.advanced_section.content.isHidden()
+    assert walker.route_snapshot() == original
+
+
 def test_controls_have_all_actions_and_default_interval(cavebot):
     _, tab, _ = cavebot
     assert [tab.combo_action.itemText(index) for index in range(tab.combo_action.count())] == [
         "Walk", "Wait", "Say", "Safe Spot", "BOX", "Stair"]
     assert tab.spin_interval.value() == 3
+
+
+def test_distance_guard_controls_enforce_hysteresis_and_rebind(cavebot):
+    _, tab, walker = cavebot
+    tab.chk_distance_guard.setChecked(True)
+    tab.spin_distance_max.setValue(6)
+    tab.spin_distance_resume.setValue(4)
+    assert walker.route_snapshot()["distance_guard"] == {
+        "enabled": True, "max_distance": 6, "resume_distance": 4}
+    tab.spin_distance_max.setValue(3)
+    assert tab.spin_distance_resume.value() == 2
+    assert walker.distance_guard_resume == 2
+    walker.configure_distance_guard(enabled=False, max_distance=8, resume_distance=1)
+    tab.set_walker(walker)
+    assert not tab.chk_distance_guard.isChecked()
+    assert tab.spin_distance_max.value() == 8
+    assert tab.spin_distance_resume.value() == 1
+
+def test_distance_guard_profile_load_and_pause_status(cavebot, tmp_path):
+    from core.profiles import ProfileManager
+    _, tab, walker = cavebot
+    walker.add_waypoint(120, 200, 7)
+    walker.configure_distance_guard(enabled=True, max_distance=7, resume_distance=2)
+    tab.profile_manager = ProfileManager(tmp_path / "hunts.json")
+    tab.profile_manager.save_profile("Distância", walker.route_snapshot())
+    walker.configure_distance_guard(enabled=False)
+    tab._refresh_profiles("Distância")
+    tab._on_load_profile()
+    assert tab.chk_distance_guard.isChecked()
+    assert tab.spin_distance_max.value() == 7
+    assert tab.spin_distance_resume.value() == 2
+    walker.pokemon_position_provider = lambda: None
+    walker.tick()
+    tab._refresh_state()
+    assert "POSIÇÃO DO POKÉMON INDISPONÍVEL" in tab.lbl_state.text()
+    assert "distance_unavailable" in walker.stats["pause_reasons"]
+
+def test_dynamic_lure_controls_sync_and_persist(cavebot):
+    _, tab, walker = cavebot
+    assert tab.chk_dynamic_lure.isChecked() == walker.dynamic_lure_enabled
+    assert tab.spin_dynamic_max.value() == walker.dynamic_lure_max_distance
+    assert tab.spin_dynamic_resume.value() == walker.dynamic_lure_resume_distance
+    assert tab.chk_dynamic_move.isChecked() == walker.dynamic_lure_use_move_command
+    assert tab.edit_dynamic_move.text() == walker.dynamic_lure_move_command
+
+    tab.chk_dynamic_lure.setChecked(True)
+    tab.spin_dynamic_max.setValue(6)
+    tab.spin_dynamic_resume.setValue(4)
+    tab.edit_dynamic_move.setText("{name}, move {x} {y} {z}!")
+    tab.edit_dynamic_move.editingFinished.emit()
+    assert walker.dynamic_lure_enabled is True
+    assert walker.dynamic_lure_max_distance == 6
+    assert walker.dynamic_lure_resume_distance == 4
+    assert walker.dynamic_lure_move_command == "{name}, move {x} {y} {z}!"
+    assert walker.ctx.get("walker", "dynamic_lure_enabled") is True
+    assert walker.ctx.get("walker", "dynamic_lure_max_distance") == 6
+    assert walker.ctx.get("walker", "dynamic_lure_move_command") == "{name}, move {x} {y} {z}!"
+
+    tab.spin_dynamic_max.setValue(3)
+    assert tab.spin_dynamic_resume.value() == 2
+    assert walker.dynamic_lure_resume_distance == 2
+
+
+def test_replacing_walker_syncs_dynamic_lure_controls(cavebot):
+    _, tab, _ = cavebot
+    other = Walker(input_bus=MagicMock(), loop=False)
+    other.dynamic_lure_enabled = True
+    other.dynamic_lure_max_distance = 7
+    other.dynamic_lure_resume_distance = 2
+    other.dynamic_lure_use_move_command = False
+    other.dynamic_lure_move_command = "{name}, venha!"
+    tab.set_walker(other)
+    assert tab.chk_dynamic_lure.isChecked() is True
+    assert tab.spin_dynamic_max.value() == 7
+    assert tab.spin_dynamic_resume.value() == 2
+    assert tab.chk_dynamic_move.isChecked() is False
+    assert tab.edit_dynamic_move.text() == "{name}, venha!"
+    other.stop(timeout=0.5)
 
 
 def test_adding_waypoint_preserves_action_and_parameter(cavebot):
@@ -74,6 +165,34 @@ def test_recording_uses_live_options_and_interval(cavebot):
     assert walker.waypoints[-1]["param"] == "!pokestop"
     tab.btn_record.click()
     assert not walker.recording
+
+
+def test_recording_continues_through_gui_refresh_without_stopping(cavebot, monkeypatch):
+    _, tab, walker = cavebot
+    clock = [0.0]
+    monkeypatch.setattr("modules.walker.time.monotonic", lambda: clock[0])
+    tab.btn_record.click()
+    for step in range(1, 7):
+        clock[0] += 0.1
+        walker.read_player_position.return_value = (100 + step, 200, 7)
+        tab._refresh_state()
+    assert [point["x"] for point in walker.waypoint_snapshot()] == [100, 103, 106]
+    assert tab.table_waypoints.rowCount() == 3
+    tab.btn_record.click()
+
+
+def test_recording_waits_for_valid_memory_then_recovers(cavebot):
+    _, tab, walker = cavebot
+    walker.read_player_position.return_value = None
+    tab.btn_record.click()
+    tab._refresh_state()
+    assert "AGUARDANDO POSIÇÃO" in tab.lbl_state.text()
+    assert walker.waypoint_snapshot() == []
+    walker.read_player_position.return_value = (100, 200, 7)
+    tab._refresh_state()
+    assert tab.lbl_state.text() == "GRAVANDO"
+    assert len(walker.waypoint_snapshot()) == 1
+    tab.btn_record.click()
 
 
 def test_nearest_button_rotates_and_starts(cavebot):
@@ -227,3 +346,92 @@ def test_replacing_walker_synchronizes_tolerance_without_overwriting(cavebot):
     assert tab.spin_arrival_tolerance.value() == replacement.arrival_tolerance == 0
     tab.spin_arrival_tolerance.setValue(2)
     assert replacement.arrival_tolerance == 2
+
+
+
+def test_table_initializes_empty_without_ghost_waypoint(cavebot):
+    _, tab, walker = cavebot
+    tab._refresh_state()
+    assert tab.table_waypoints.rowCount() == 0
+    assert not walker.waypoint_snapshot()
+    assert tab.spin_z.value() == 7
+
+
+@pytest.mark.parametrize("position,expected_z", [((100, 200, 8), 8), (None, 7), ((65535, 65535, 255), 7)])
+def test_manual_waypoint_uses_live_floor_or_seven(cavebot, position, expected_z):
+    _, tab, walker = cavebot
+    tab.spin_x.setValue(123)
+    tab.spin_y.setValue(456)
+    tab.spin_z.setValue(15)
+    walker.read_player_position.return_value = position
+    tab.btn_add_wp.click()
+    assert walker.waypoint_snapshot()[0] == {
+        "x": 123, "y": 456, "z": expected_z, "action": "Walk", "param": ""}
+    assert tab.table_waypoints.item(0, 3).text() == str(expected_z)
+    assert tab.spin_z.value() == expected_z
+
+
+def test_current_position_uses_live_floor_without_clamping_sentinel(cavebot):
+    _, tab, walker = cavebot
+    walker.read_player_position.return_value = (100, 200, 8)
+    tab.btn_add_current.click()
+    assert walker.waypoints[0]["z"] == 8
+    walker.read_player_position.return_value = (65535, 65535, 255)
+    tab.btn_add_current.click()
+    assert len(walker.waypoints) == 1
+    assert tab.spin_z.value() == 7
+
+
+def test_delete_selected_waypoint_updates_route_and_numbering(cavebot):
+    _, tab, walker = cavebot
+    for coordinate in (100, 101, 102):
+        walker.add_waypoint(coordinate, 200, 7)
+    tab._sync_waypoint_list()
+    tab.table_waypoints.selectRow(1)
+    tab.btn_delete_wp.click()
+    assert [point["x"] for point in walker.waypoint_snapshot()] == [100, 102]
+    assert tab.table_waypoints.rowCount() == 2
+    assert tab.table_waypoints.item(1, 0).text() == "2"
+    assert tab.table_waypoints.item(1, 1).text() == "102"
+    tab.table_waypoints.clearSelection()
+    tab.btn_delete_wp.click()
+    assert len(walker.waypoints) == 2
+
+
+
+def test_gui_warns_once_on_persistent_memory_failure_and_recovers(cavebot, monkeypatch, caplog):
+    _, tab, walker = cavebot
+    clock = [10.0]
+    monkeypatch.setattr("ui.cavebot_tab.time.monotonic", lambda: clock[0])
+    walker.add_waypoint(105, 200, 7)
+    walker._running = True
+    walker.state = WalkerState.MOVING
+    walker.read_player_position.return_value = None
+    tab._refresh_state()
+    clock[0] = 15.1
+    tab._refresh_state()
+    assert "MEMÓRIA" in tab.lbl_state.text()
+    assert "#FFAB00" in tab.lbl_state.styleSheet()
+    tab._refresh_state()
+    assert sum("Walker parado, aguardando leitura de memória" in message for message in caplog.messages) == 1
+    walker.read_player_position.return_value = (100, 200, 7)
+    tab._refresh_state()
+    assert tab.lbl_state.text() == "MOVENDO"
+    assert not tab.lbl_state.styleSheet()
+    walker._running = False
+
+
+def test_gui_does_not_warn_during_programmed_long_wait(cavebot, monkeypatch, caplog):
+    _, tab, walker = cavebot
+    clock = [10.0]
+    monkeypatch.setattr("ui.cavebot_tab.time.monotonic", lambda: clock[0])
+    walker.add_waypoint(100, 200, 7, "Wait", "10000")
+    walker.tick()
+    walker._running = True
+    tab._refresh_state()
+    clock[0] = 16.0
+    tab._refresh_state()
+    assert tab.lbl_state.text() == "AGUARDANDO"
+    assert not tab.lbl_state.styleSheet()
+    assert "Walker parado, aguardando leitura de memória" not in caplog.text
+    walker._running = False

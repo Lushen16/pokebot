@@ -6,7 +6,7 @@ from unittest.mock import Mock
 from memory import Process, Resolver
 from offset_contract import validate_offsets
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 BASE = 0x7FF7092F0000
 TARGET = 0x16C0E200000
 
@@ -21,9 +21,10 @@ class HPResolverTests(unittest.TestCase):
         self.resolver = Resolver(self.proc, str(ROOT/'offsets.json'), str(ROOT/'config.json'))
 
     def test_x_no_deref(self):
-        # Direct-address fixture; calibrated XYZ chains remain unchanged.
+        # Direct-address fixture; calibrated XYZ chains deref the global player pointer.
         self.resolver.entries['player.x']['steps'] = []
-        self.assertEqual(self.resolver.resolve_entry('player.x'), BASE + 0x3904CA8 + 0x28)
+        self.resolver.entries['player.x']['deref'] = False
+        self.assertEqual(self.resolver.resolve_entry('player.x'), BASE + 0x38FADD0 + 0x20)
         self.proc.read_ptr.assert_not_called()
 
     def test_hp_with_zero_step(self):
@@ -37,14 +38,14 @@ class HPResolverTests(unittest.TestCase):
         self.proc.read_value.assert_called_once_with(TARGET, 'int32')
 
     def test_xz_unaffected_by_deref_change(self):
-        for axis, terminal in [('x', 0x28), ('y', 0x2c), ('z', 0x30)]:
+        for axis, terminal in [('x', 0x20), ('y', 0x24), ('z', 0x28)]:
             with self.subTest(axis=axis):
                 self.proc.read_ptr.reset_mock()
                 entry = self.resolver.entries['player.'+axis]
-                self.assertFalse(entry.get('deref', False))
-                self.assertEqual(self.resolver.resolve_entry('player.'+axis), TARGET+0x08+terminal)
+                self.assertTrue(entry.get('deref', False))
+                self.assertEqual(self.resolver.resolve_entry('player.'+axis), TARGET+terminal)
                 self.assertEqual([call.args for call in self.proc.read_ptr.call_args_list], [
-                    (BASE+0x3904CA8,), (TARGET+0x50,),
+                    (BASE+0x38FADD0,),
                 ])
         self.proc.read_value.return_value = 0x0b220006
         self.assertEqual(self.resolver.read_entry('player.z'), 6)

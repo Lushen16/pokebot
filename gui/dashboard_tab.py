@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import QFormLayout, QGroupBox, QLabel, QProgressBar, QFrame, QHBoxLayout, QVBoxLayout
+from PySide6.QtWidgets import QGroupBox, QLabel, QProgressBar, QFrame, QHBoxLayout, QVBoxLayout
 from core.position import is_valid_position
 from gui.icons import icon
 
@@ -31,30 +31,49 @@ class SetupStep(QFrame):
 
 class LiveStatusPanel(QGroupBox):
     def __init__(self, parent=None):
-        super().__init__("PERSONAGEM · AO VIVO", parent)
-        layout = QFormLayout(self)
-        self.connection = QLabel("SEM CONEXÃO")
-        self.name = QLabel("Não calibrado")
-        self.hp = QLabel("—")
+        super().__init__("CLIENTE", parent)
+        self.setObjectName("liveCard")
+        self.setProperty("accent", True)
+        self.setMinimumHeight(210)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 20, 18, 18)
+        layout.setSpacing(10)
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.connection = QLabel("SEM CONEXÃO", self)
+        self.connection.setObjectName("connectionPill")
+        top.addWidget(self.connection)
+        top.addStretch()
+        layout.addLayout(top)
+        self.name = QLabel("Nome indisponível", self)
         self.name.setObjectName("playerName")
+        layout.addWidget(self.name)
+        hp_row = QHBoxLayout()
+        hp_row.setSpacing(8)
+        self.hp = QLabel("—", self)
         self.hp.setObjectName("statValue")
+        hp_row.addWidget(self.hp)
+        hp_row.addStretch()
+        self.hp_percent = QLabel("—", self)
+        self.hp_percent.setObjectName("metricValue")
+        hp_row.addWidget(self.hp_percent)
+        layout.addLayout(hp_row)
         self.hp_bar = QProgressBar(self)
         self.hp_bar.setRange(0, 100)
         self.hp_bar.setValue(0)
         self.hp_bar.setTextVisible(False)
-        self.hp_percent = QLabel("—", self)
         self.hp_bar.setProperty("health", "unknown")
         self.hp_bar.setFormat("Sem leitura")
         self.hp_bar.setAccessibleName("Vida do personagem")
-        self.position = QLabel("X: —  Y: —  Z: —")
-        layout.addRow("Conexão:", self.connection)
-        layout.addRow("Personagem:", self.name)
-        layout.addRow("HP:", self.hp)
-        bar_row = QHBoxLayout()
-        bar_row.addWidget(self.hp_bar, 1)
-        bar_row.addWidget(self.hp_percent)
-        layout.addRow(bar_row)
-        layout.addRow("Posição:", self.position)
+        layout.addWidget(self.hp_bar)
+        layout.addSpacing(2)
+        position_label = QLabel("POSIÇÃO", self)
+        position_label.setObjectName("metricLabel")
+        layout.addWidget(position_label)
+        self.position = QLabel("X: —  Y: —  Z: —", self)
+        self.position.setObjectName("positionValue")
+        layout.addWidget(self.position)
+        layout.addStretch()
 
     def show_snapshot(self, snapshot):
         position = snapshot.get("position")
@@ -65,7 +84,7 @@ class LiveStatusPanel(QGroupBox):
         self.connection.setText("MEMÓRIA CONECTADA" if valid else "ATUALIZANDO POSIÇÃO…" if updating else "LEITURA INDISPONÍVEL")
         color = "#00c853" if valid else "#ffab00" if updating else "#ff5252"
         self.setStyleSheet("QGroupBox { border: 1px solid " + color + "; }")
-        self.name.setText(str(snapshot.get("name") or "Não calibrado"))
+        self.name.setText(str(snapshot.get("name") or "Nome indisponível"))
         hp, maximum = snapshot.get("hp"), snapshot.get("hp_max")
         self.hp.setText(f"{hp} / {maximum}" if hp is not None and maximum is not None else "—")
         hp_valid = (type(hp) is int and type(maximum) is int and maximum > 0 and 0 <= hp <= maximum)

@@ -14,25 +14,29 @@
     },
     "player.hp": {
       "module": "PokeAlliance_dx.exe",
-      "base_rva": 59908704,
-      "steps": [0],
+      "base_rva": 59788600,
+      "steps": [
+        0
+      ],
       "terminal": 0,
       "deref": false,
       "type": "int32",
       "verified": true,
       "source": "reversed_disasm",
-      "note": "Validado por pointer scan em sessão 2026-10-16"
+      "note": "2026-10-17: RVA 0x3904D38 validado na sessao PID 31952; HP acompanhou 94 -> 88 -> 79 em 0x19CA8F90000. verified refere-se somente a esta sessao; restart pendente. RVA antigo 0x3922260 estava nulo."
     },
     "player.hp_max": {
       "module": "PokeAlliance_dx.exe",
-      "base_rva": 59908704,
-      "steps": [0],
+      "base_rva": 59788600,
+      "steps": [
+        0
+      ],
       "terminal": 4,
       "type": "int32",
       "deref": false,
       "verified": true,
       "source": "reversed_disasm",
-      "note": "Validado por pointer scan; mesmo ponteiro do player.hp, terminal +4"
+      "note": "2026-10-17: mesmo ponteiro do player.hp (RVA 0x3904D38), terminal +4; leitura 200 durante HP 88 e 79 no PID 31952. verified refere-se somente a esta sessao; confirmar maximo na tela e restart pendentes."
     },
     "player.mp": {
       "module": "PokeAlliance_dx.exe",
@@ -66,39 +70,45 @@
     },
     "player.x": {
       "module": "PokeAlliance_dx.exe",
-      "base_rva": 59867008,
-      "steps": [
-        0
-      ],
-      "terminal": 40,
+      "base_rva": 59747792,
+      "steps": [],
+      "signature": "48 8B 0D ?? ?? ?? ?? 48 85 C9 0F 84 9D 00 00 00 80 B9 B0 00 00 00 00 0F",
+      "signature_disp": 3,
+      "signature_length": 7,
+      "deref": true,
+      "terminal": 32,
       "type": "int32",
       "verified": true,
-      "note": "CE pointer chain: read_ptr(module_base + base_rva) + terminal. User reports validation across client restarts.",
-      "source": "verified_ce"
+      "source": "reversed_disasm",
+      "note": "2026-10-19: base resolvida por assinatura de codigo (RIP-relativa) porque o RVA deixou de ser confiavel entre builds. Assinatura unica no .text resolve para PokeAlliance_dx.exe+0x38FADD0; deref + terminal 0x20. Validado ao vivo no PID 20516 (alvo == base+0x38FADD0, leitura 3298/2220/8). Formato: signature_disp = offset do disp32 na assinatura, signature_length = tamanho da instrucao."
     },
     "player.y": {
       "module": "PokeAlliance_dx.exe",
-      "base_rva": 59867008,
-      "steps": [
-        0
-      ],
-      "terminal": 44,
+      "base_rva": 59747792,
+      "steps": [],
+      "signature": "48 8B 0D ?? ?? ?? ?? 48 85 C9 0F 84 9D 00 00 00 80 B9 B0 00 00 00 00 0F",
+      "signature_disp": 3,
+      "signature_length": 7,
+      "deref": true,
+      "terminal": 36,
       "type": "int32",
       "verified": true,
-      "note": "CE pointer chain: read_ptr(module_base + base_rva) + terminal. User reports validation across client restarts.",
-      "source": "verified_ce"
+      "source": "reversed_disasm",
+      "note": "2026-10-19: mesma cadeia de player.x (0x38FADD0 deref), terminal +0x24. Validado no PID 20516 (1315,1386,6) e por movimento D/S/A/W."
     },
     "player.z": {
       "module": "PokeAlliance_dx.exe",
-      "base_rva": 59867008,
-      "steps": [
-        0
-      ],
-      "terminal": 48,
+      "base_rva": 59747792,
+      "steps": [],
+      "signature": "48 8B 0D ?? ?? ?? ?? 48 85 C9 0F 84 9D 00 00 00 80 B9 B0 00 00 00 00 0F",
+      "signature_disp": 3,
+      "signature_length": 7,
+      "deref": true,
+      "terminal": 40,
       "type": "int32",
       "verified": true,
-      "note": "CE pointer chain: read_ptr(module_base + base_rva) + terminal. User reports validation across client restarts.",
-      "source": "verified_ce",
+      "source": "reversed_disasm",
+      "note": "2026-10-19: mesma cadeia de player.x (0x38FADD0 deref), terminal +0x28; Z ocupa apenas o byte baixo.",
       "mask": 255,
       "shift": 0
     },
@@ -346,12 +356,58 @@
       "module": "PokeAlliance_dx.exe",
       "base_rva": 59906888,
       "steps": [],
+      "signature": "48 8B 0D ?? ?? ?? ?? 48 85 C9 0F 84 9D 00 00 00 80 B9 B0 00 00 00 00 0F",
+      "signature_disp": 3,
+      "signature_length": 7,
       "deref": true,
       "terminal": 968,
       "type": "int32",
       "source": "verified_ce",
       "verified": true,
       "note": "Active/selected Pokemon HP percentage, not absolute HP. User confirmed damage/healing, switching 87 -> 100 -> 87, and persistence after client restart. Call at +62D35E passes address of global slot +3921B48; callee +62D040 dereferences it and writes a computed percentage at object+3C8. Re-read pointer on every access."
+    },
+    "pokemon.roster": {
+      "module": "PokeAlliance_dx.exe",
+      "base_rva": 59757872,
+      "steps": [
+        7928,
+        2608,
+        5192
+      ],
+      "terminal": 0,
+      "deref": false,
+      "type": "uint32",
+      "source": "verified_ce",
+      "verified": true,
+      "note": "Party Array base (PokeAlliance_dx.exe + 0x38FD530 -> +0x1ef8 -> +0xa30 -> +0x1448). Each slot has stride 0x10 with pokemon struct pointer at +0x08."
+    },
+    "world.entity_list_ptr": {
+      "module": "PokeAlliance_dx.exe",
+      "base_rva": null,
+      "steps": [],
+      "signature": "48 8B 1D ?? ?? ?? ?? 48 85 DB 0F 84 87 00 00 00 48 89 7C 24 30 48 8B 3D 96 5F F7 01",
+      "signature_disp": 3,
+      "signature_length": 7,
+      "deref": true,
+      "terminal": 0,
+      "type": "uint32",
+      "verified": true,
+      "source": "signature_scan",
+      "note": "2026-10-19: assinatura unica no .text (funcao que itera o registry) resolve para o slot global PokeAlliance_dx.exe+0x38F4510; deref entrega o inicio do array de handles (stride 0x10, par {base, base-0x10}). Ao vivo PID 20516: begin=0x19130ecbe00, 30 handles. Nao e a lista de spawns ativos; e o pool/registry de criaturas."
+    },
+    "world.entity_list_end": {
+      "module": "PokeAlliance_dx.exe",
+      "base_rva": null,
+      "steps": [],
+      "signature": "48 8B 15 ?? ?? ?? ?? 48 8B 7C 24 30 48 2B D3 48 83 E2 F0 48 81 FA 00 10 00 00 72 1E 48 8B 4B F8 48 2B D9 48 83 EB 08 48 83 FB 1F 77 06 48 83 C2 27 EB 0A B9 05 00 00 00 CD 29 48 8B CB E8 09 E1",
+      "signature_disp": 3,
+      "signature_length": 7,
+      "deref": true,
+      "terminal": 0,
+      "type": "uint32",
+      "verified": true,
+      "source": "signature_scan",
+      "note": "2026-10-19: mesma funcao do registry; resolve o slot global PokeAlliance_dx.exe+0x38F4520 (fim do vetor). deref entrega o end. count = (end - begin) / 0x10; ao vivo PID 20516 = 30."
     }
   }
 }

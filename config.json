@@ -13,14 +13,15 @@
     "window_class": null,
     "process_name": "PokeAlliance_dx.exe",
     "focus_before_input": true,
+    "input_mode": "background",
     "refocus_delay_ms": 120,
     "click_delay_ms": 45,
     "key_delay_ms": 30,
-    "target_pid": 18352
+    "target_pid": 6796
   },
   "modules": {
     "healer": {
-      "enabled": true,
+      "enabled": false,
       "tick_ms": 400
     },
     "auto_food": {
@@ -32,7 +33,7 @@
       "tick_ms": 200
     },
     "auto_target": {
-      "enabled": false,
+      "enabled": true,
       "tick_ms": 300
     },
     "auto_catch": {
@@ -53,40 +54,40 @@
     "6": ""
   },
   "healer": {
-    "hp_percent_threshold": 90,
-    "emergency_threshold_pct": 20,
-    "hotkey": "F1",
-    "emergency_hotkey": "F3",
+    "action_delay_ms": 700,
     "cooldown_ms": 800,
-    "emergency_cooldown_ms": 400,
     "delay_between_heals_ms": 50,
+    "emergency_cooldown_ms": 400,
+    "emergency_hotkey": "F3",
+    "emergency_threshold_pct": 20,
+    "heal_move": "m4",
+    "heal_pokemon_name": "",
+    "heal_pokemon_slot": 4,
+    "heal_pokemon_uuid": "slot_4",
+    "hold_ms": 50,
+    "hotkey": "F1",
+    "hp_above_percent": 80,
+    "hp_hotkey": "F1",
+    "hp_percent_threshold": 90,
+    "mp_above_percent": 90,
+    "mp_hotkey": "F2",
+    "mp_percent_threshold": 42,
+    "note": "Cura: Pokemon de cura -> skill -> Pokemon de reset (opcional) -> Pokemon de retorno. Slots F1-F6; delays em ms.",
+    "panic_delay_ms": 250,
+    "panic_hotkey": "F3",
+    "panic_hp_percent": 20,
     "pokemon_heal_hotkey": "F4",
     "pokemon_heal_skill_hotkey": "F4",
-    "pokemon_return_hotkey": "F1",
-    "pokemon_reset_hotkey": "",
     "pokemon_reset_delay_ms": 303,
-    "pokemon_swap_delay_ms": 700,
+    "pokemon_reset_hotkey": "",
+    "pokemon_return_hotkey": "F1",
     "pokemon_skill_delay_ms": 700,
-    "hp_above_percent": 80,
-    "mp_percent_threshold": 42,
-    "mp_above_percent": 90,
-    "hp_hotkey": "F1",
-    "mp_hotkey": "F2",
-    "panic_hp_percent": 20,
-    "panic_hotkey": "F3",
-    "panic_delay_ms": 250,
-    "note": "Cura: Pokemon de cura -> skill -> Pokemon de reset (opcional) -> Pokemon de retorno. Slots F1-F6; delays em ms.",
-    "heal_pokemon_name": "Togepi",
-    "heal_pokemon_slot": 4,
-    "heal_move": "m4",
-    "heal_pokemon_uuid": "slot_4",
-    "return_pokemon_name": "Spearow",
+    "pokemon_swap_delay_ms": 700,
     "reset_pokemon_name": "",
-    "revive_hotkey": "Shift+F",
-    "swap_by_slot_key": true,
+    "return_pokemon_name": "",
     "revive_delay_ms": 700,
-    "action_delay_ms": 700,
-    "hold_ms": 50
+    "revive_hotkey": "Shift+F",
+    "swap_by_slot_key": true
   },
   "auto_food": {
     "interval_seconds": 62,
@@ -106,29 +107,69 @@
     "pause_on_creature_within_tiles": 2,
     "resume_after_combat_seconds": 4,
     "walk_keys": {
-      "north": "Up",
-      "south": "Down",
-      "east": "Right",
-      "west": "Left"
+      "north": "W",
+      "south": "S",
+      "east": "D",
+      "west": "A"
     },
     "note": "walk_mode 'key_hold' sends direction scancodes for key_hold_ms and re-checks position from memory. 'click_tile' needs calibrated tile_map and stays off until offsets land."
   },
+  "walker": {
+    "dynamic_lure_enabled": false,
+    "dynamic_lure_max_distance": 4,
+    "dynamic_lure_resume_distance": 3,
+    "dynamic_lure_chase": true,
+    "dynamic_lure_use_move_command": false,
+    "dynamic_lure_move_command": "{name}, move!",
+    "dynamic_lure_move_cooldown_ms": 1200,
+    "note": "Lure dinamico: com o Pokemon ativo a max_distance SQM ou mais, usa o comando de chat move para traze-lo ao treinador; ao chegar a resume_distance, retoma a rota. use_move_command=false cai no chase/espera.",
+    "dynamic_lure_move_command_verified": false
+  },
   "auto_target": {
-    "attack_range_tiles": 7,
+    "attack_range_tiles": 4,
     "attack_cooldown_ms": 900,
-    "attack_hotkey": "F5",
+    "combat_resume_delay_ms": 1000,
+    "attack_hotkey": "",
     "target_mode": "attack_hotkey",
-    "prioritize": "lowest_hp_percent",
+    "prioritize": "highest_level",
     "ignore_players": true,
     "ignore_npcs": true,
     "ignore_dead": true,
+    "lure_target_count": 8,
+    "lure_radius": 20,
+    "combo_hotkey": "C",
+    "combo_command": "",
+    "combo_sequence": "m1,m2,m3,m4,m5,m6",
+    "combo_wait_ms": 1000,
+    "focus_shiny": true,
+    "revive_hotkey": "Shift+F",
+    "revive_delay_ms": 1100,
+    "max_combat_loops": 5,
+    "post_combat_revive": true,
     "name_whitelist": [],
     "name_blacklist": [
       "Gary"
     ],
     "min_level": 1,
     "chase_enabled": false,
-    "note": "target_mode 'attack_hotkey' presses the client's attack key on a selected creature. 'click_creature' needs calibrated screen projection, added later."
+    "note": "Lure: junta lure_target_count criaturas em lure_radius, o Target pausa o walker, solta o combo (combo_hotkey ou combo_command '!autocombo' no chat), revive se sobrar bicho e retoma a rota. focus_shiny prioriza shiny. target_mode 'attack_hotkey' usa a tecla de ataque do cliente.",
+    "perfect_lure_enabled": true,
+    "emergency_hp_percent": 40,
+    "lure_radius_sqm": 5,
+    "min_monsters_to_lure": 8,
+    "max_lure_wait_ms": 1000,
+    "group_stable_ms": 900,
+    "active_pokemon": "",
+    "best_tile_enabled": true,
+    "best_tile_radius": 4,
+    "best_tile_wall_margin": 3,
+    "best_tile_max_wait_ms": 2500,
+    "kill_all_on_damage": true,
+    "damage_threshold_pct": 1,
+    "finish_remaining_count": 0,
+    "force_kill_max_ms": 8000,
+    "post_combat_heal": true,
+    "combo_repeat_interval_ms": 1000
   },
   "auto_catch": {
     "enabled_creature_names": [
@@ -208,6 +249,7 @@
     ]
   },
   "combat": {
-    "healing_in_progress": false
+    "healing_in_progress": false,
+    "target_active": false
   }
 }

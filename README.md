@@ -14,7 +14,7 @@ Snapshot dos offsets: [backup_ponteiros](backup_ponteiros/README.md).
 A skill é escolhida manualmente entre M1–M5, sem ler habilidades ou
 cooldowns da telemetria. O painel ainda não executa cura por Pokémon.
 
-Na aba Combat, o painel Pokémon de cura lista os Pokémon da pokébar
+Na aba Healer, o painel Pokémon de cura lista os Pokémon da pokébar
 do cliente escolhido e permite escolher manualmente M1, M2, M3, M4 ou M5.
 A seleção usa UUID, não nome ou slot: continua identificando o mesmo
 Pokémon quando a pokébar muda de ordem e distingue nomes repetidos.
@@ -70,12 +70,15 @@ O limite de candidatos interrompe explicitamente o scan, sem truncar resultados.
 
 ## Walker: ações e gravação de rotas
 
-Cada waypoint contém x, y, z, action e param. A aba Cavebot oferece Walk,
+Cada waypoint contém x, y, z, action e param. A aba Rota oferece Walk,
 Wait (milissegundos), Say (texto), Safe Spot, BOX e Stair. As três últimas
 ações são marcadores passivos, sem automação especial nesta etapa.
 
 Walk aceita uma margem de chegada configurável de 0 a 2 SQM por eixo
-(padrão 1), sempre no mesmo andar. Todas as demais ações exigem o tile exato.
+(padrão 1). Walk, BOX, Safe Spot e Wait usam somente X/Y, ignorando o Z
+armazenado. As demais ações exigem X/Y exatos; somente Stair aguarda
+o andar configurado antes de concluir. Stair continua sendo um marcador,
+sem interação automática para subir ou descer.
 A tolerância é salva no perfil da Hunt; perfis antigos usam o padrão 1.
 Ao concluir cada waypoint, o Walker libera as teclas e faz uma pausa aleatória
 de 50 a 200 ms, controlada por relógio monotônico sem bloquear a thread.
@@ -88,14 +91,37 @@ Say enfileira Enter, texto via VK/SendInput e Enter, sem clipboard. Comece
 com o chat fechado. O retorno true indica aceitação na fila, não confirmação
 da mensagem pelo jogo.
 
-A gravação confirma posições estáveis por 300 ms, com relógio monotônico,
-e usa intervalo padrão de 3 SQM entre posições confirmadas. Pare por pelo
-menos 300 ms nos pontos e curvas que deseja gravar; amostras transitórias
-da diagonal são descartadas. Finalizar gravação preserva somente posições
-confirmadas. A execução alinha X primeiro, solta A/D e então alinha Y;
+A gravação é contínua: usa intervalo padrão de 3 SQM e preserva curvas,
+sem exigir uma pausa em cada tile. Finalizar gravação inclui a última
+posição válida. Leituras inválidas não geram pontos; a interface indica
+que está aguardando posição e retoma quando a leitura volta. O botão de
+gravação adiciona pontos à rota atual; use Limpar para começar outra rota.
+O filtro de estabilidade é opcional via `record_stable_ms` (padrão 0).
+Na gravação, (0, 0) e saltos acima de 20 SQM por eixo são descartados;
+saltos não são conectados automaticamente. Waypoints (0, 0) de perfis
+antigos são ignorados no carregamento com aviso, sem regravar o arquivo.
+Pontos manuais distantes continuam permitidos para não apagar trajetos legítimos.
+O Healer aguarda pelo menos 5 segundos após cada tentativa automática,
+inclusive recusada ou com exceção. Isso também limita a repetição em emergência.
+Leituras HP/HP máximo não finitas, sentinela 65535 ou acima de 100000
+não disparam a troca de Pokémon.
+A execução alinha X primeiro, solta A/D e então alinha Y;
 não envia duas direções simultaneamente e não substitui um pathfinder.
+O Dashboard e a Engine usam as teclas de cavebot.walk_keys em config.json
+(north/south/east/west: Up/Down/Right/Left ou W/S/D/A). Um Walker criado
+sem configuração usa WASD. Configure as teclas que movimentam o seu cliente.
+Uma tecla na fila não prova envio: falhas de foco ou SendInput permitem
+nova tentativa no tick seguinte, sem duplicar comandos ainda pendentes.
+Ao encerrar, o InputBus libera as teclas e descarta comandos antigos antes
+de permitir um novo início.
 Iniciar no Mais Próximo
-rotaciona a rota sem perder pontos; considera apenas o andar atual.
+rotaciona a rota sem perder pontos; ignora Z para ações planas e filtra
+Stair pelo andar atual. Na gravação normal, mudanças somente de Z não
+criam pontos nem reiniciam a confirmação de estabilidade. Z é mantido como
+metadado informativo. A inclusão manual usa o Z lido ou 7 como padrão;
+Usar Posição Atual exige uma posição válida, sem inventar X/Y.
+Selecione uma linha e use Deletar Waypoint selecionado com a rota e a
+gravação paradas para corrigir pontos sem apagar os demais.
 Detalhes de ownership, threads e testes: [contrato Qt](docs/QT_CONTRACT.md).
 
 ### Dashboard e Hunts configuradas
@@ -113,7 +139,7 @@ em core/position.py, não uma medição do limite real do mapa. O nome do
 personagem aparece como Não calibrado enquanto
 não houver um leitor de nome validado; nenhum nome é inferido dos offsets XYZ.
 
-Na aba Cavebot, Salvar Nova Hunt grava waypoints, Loop e configuração do
+Na aba Rota, Salvar Nova Hunt grava waypoints, Loop e configuração do
 Healer em hunts.json, ao lado de config.json. Carregar Hunt restaura esses
 valores sem iniciar a rota. Pare a rota/gravação antes de trocar de perfil.
 O arquivo é criado no primeiro salvamento, escrito atomicamente e mantido
@@ -153,3 +179,27 @@ fica ativo apenas quando o botão está disponível para iniciar. A barra de HP 
 verde acima de 60%, amarela de 20% até 60% e vermelha abaixo de 20%; uma leitura
 inválida limpa a barra e o percentual. Selecionar o processo continua iniciando
 somente a leitura de memória, sem ligar os módulos.
+
+
+### Recuperação de leitura e watchdog do Walker
+
+A leitura do tick faz uma tentativa por vez. Em caso de falha, os próximos
+prazos usam 50, 100, 200 e 400 ms; após cinco tentativas um novo lote é
+permitido, sem sleep nem laço bloqueante. Um WARNING por episódio registra
+o motivo disponível no resolver (incluindo ponteiro nulo); sucesso e parada
+limpam os prazos e contadores. Coordenadas iguais a zero continuam válidas:
+ponteiro nulo não é a mesma coisa que X/Y iguais a zero.
+
+O limite de cegueira continua em 500 ms ou 11 ticks: libera teclas, preserva
+o waypoint e aguarda nova leitura. Com posição válida, tecla solicitada e
+X/Y imóveis por 2 segundos, o watchdog libera as teclas e avança o waypoint.
+Em Loop, o ponto vai para o fim da fila; não é apagado da rota circular.
+Mudanças em X/Y reiniciam o relógio; falhas de memória e Wait programado
+não provocam descarte por imobilidade.
+
+O timer de 100 ms já existente na GUI mostra alerta após 5 segundos de
+falha de memória ou estado parado anormal em uma rota ativa. Cada episódio
+gera um único WARNING. Wait dentro de seu prazo não é tratado como falha.
+O laranja é um indicador de leitura inválida, não prova de realocação do
+jogador nem de alteração dos offsets. Verifique last_position_error em
+Walker.stats e os logs antes de recalibrar ponteiros.

@@ -12,6 +12,27 @@ def profile():
             "loop": True, "arrival_tolerance": 1, "config_healer": {"hp_percent_threshold": 60}}
 
 
+def test_loading_legacy_profile_filters_origin_without_rewriting_file(tmp_path, profile, caplog):
+    path = tmp_path / "hunts.json"
+    profile["waypoints"].append(dict(x=0, y=0, z=0, action="Walk", param=""))
+    original = json.dumps({"legacy": profile})
+    path.write_text(original, encoding="utf-8")
+    loaded = ProfileManager(path).load_profile("legacy")
+    assert len(loaded["waypoints"]) == 1
+    assert path.read_text(encoding="utf-8") == original
+    assert "descartado" in caplog.text
+
+
+def test_distance_guard_profile_roundtrip_and_validation(tmp_path, profile):
+    manager = ProfileManager(tmp_path / "hunts.json")
+    profile["distance_guard"] = {"enabled": True, "max_distance": 6, "resume_distance": 2}
+    manager.save_profile("distancia", profile)
+    assert manager.load_profile("distancia") == profile
+    profile["distance_guard"]["resume_distance"] = 6
+    with pytest.raises(ValueError):
+        manager.save_profile("invalido", profile)
+    assert manager.list_profiles() == ["distancia"]
+
 def test_save_load_list_and_restart(tmp_path, profile):
     path = tmp_path / "hunts.json"
     manager = ProfileManager(path)

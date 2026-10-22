@@ -352,6 +352,42 @@ class Process:
             log.debug("read failed at 0x%X (%d bytes): %s", addr, size, exc)
             return None
 
+    def read_raw(self, addr, size) -> bytes | None:
+        """Leitura crua sem teto de safety, para varreduras controladas.
+
+        Uso restrito ao scanner de assinaturas (modulo mapeado). Retorna None em
+        qualquer falha para o scanner pular a janela.
+        """
+        if self.pm is None:
+            return None
+        try:
+            addr = int(addr)
+            size = int(size)
+        except (TypeError, ValueError):
+            return None
+        if addr <= 0 or size <= 0:
+            return None
+        try:
+            data = self.pm.read_bytes(addr, size)
+        except Exception as exc:
+            log.debug("read_raw falhou em 0x%X (%d bytes): %s", addr, size, exc)
+            return None
+        if data is None or len(data) != size:
+            return None
+        return data
+
+    @property
+    def handle(self):
+        """Handle nativo do processo (para VirtualQueryEx nos scanners)."""
+        return self.pm.process_handle if self.pm is not None else None
+
+    def read_bytes(self, addr, size) -> bytes | None:
+        """Alias de varredura: leitura crua usada pelos scanners de entidades."""
+        return self.read_raw(addr, size)
+
+    def read_uint8(self, addr) -> int | None:
+        return self.read_u8(addr)
+
     def read_u8(self, addr) -> int | None:
         data = self.read(addr, 1)
         return data[0] if data else None
@@ -437,6 +473,7 @@ class Resolver:
         self.entries = self.data["entries"]
         self._assumed_warned = set()
         self._warning_lock = threading.Lock()
+        self._signature_cache = {}
         self.last_error = None
         log.info("loaded %d offset entries (schema v2), path=%s", len(self.entries), self.offsets_path)
 
@@ -452,9 +489,35 @@ class Resolver:
 
     def can_read_field(self, block_name, field_name):
         entry = self.entries.get(f"{block_name}.{field_name}")
-        return bool(entry and entry["verified"] and entry["base_rva"] is not None
+        has_base = bool(entry and (entry["base_rva"] is not None or entry.get("signature")))
+        return bool(has_base and entry["verified"]
                     and entry["steps"] is not None and entry["terminal"] is not None
                     and all(step is not None for step in entry["steps"]))
+
+    def _signature_base(self, entry, module):
+        """Resolve a base via assinatura de codigo (com cache); None se falhar."""
+        signature = entry.get("signature")
+        if not signature:
+            return None
+        disp = entry.get("signature_disp")
+        length = entry.get("signature_length")
+        key = (entry["module"].lower(), signature, disp, length)
+        if key in self._signature_cache:
+            return self._signature_cache[key]
+
+        from core.signature import ModuleView, resolve_signature
+
+        read_fn = getattr(self.proc, "read_raw", None) or self.proc.read
+        view = ModuleView(read_fn, module["base"], module["size"],
+                          entry["module"])
+        try:
+            addr = resolve_signature(view, signature, entry["module"],
+                                     disp_offset=disp, instr_length=length)
+        except Exception as exc:  # noqa: BLE001 - scanner pode falhar de varias formas
+            log.warning("[signature] %s: %s", entry["module"], exc)
+            return None
+        self._signature_cache[key] = addr
+        return addr
 
     def read_optional_field(self, block_name, field_name):
         if not self.can_read_field(block_name, field_name):
@@ -469,16 +532,23 @@ class Resolver:
             return self._resolution_failure(name, "offset ausente ou não verificado")
         if self.proc is None:
             return self._resolution_failure(name, "processo indisponível")
-        if (entry["base_rva"] is None or entry["steps"] is None
+        if ((entry["base_rva"] is None and not entry.get("signature"))
+                or entry["steps"] is None
                 or entry["terminal"] is None or any(step is None for step in entry["steps"])):
             return self._resolution_failure(name, "chain incompleta")
         if self.proc.pointer_size not in (4, 8):
             return self._resolution_failure(name, "arquitetura/processo não anexado")
         module = self.proc.modules.get(entry["module"].lower())
-        if module is None or entry["base_rva"] >= module["size"]:
-            return self._resolution_failure(name, "módulo ausente ou RVA fora do módulo")
+        if module is None:
+            return self._resolution_failure(name, "módulo ausente")
         ceiling = (1 << (8 * self.proc.pointer_size)) - 1
-        addr = module["base"] + entry["base_rva"]
+        addr = self._signature_base(entry, module)
+        if addr is None:
+            if entry["base_rva"] is None:
+                return self._resolution_failure(name, "assinatura não resolvida")
+            if entry["base_rva"] >= module["size"]:
+                return self._resolution_failure(name, "RVA fora do módulo")
+            addr = module["base"] + entry["base_rva"]
         for step in entry["steps"]:
             if not 0 < addr <= ceiling - self.proc.pointer_size + 1:
                 return self._resolution_failure(name, "endereço de ponteiro fora do intervalo")

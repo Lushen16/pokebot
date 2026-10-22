@@ -18,7 +18,7 @@ import win32process
 
 from context import get_context
 from wininput import send_scancode, vk_to_scancode, send_mouse_button, sendinput_selftest
-from wininput import text_key_codes, send_virtual_keys
+from wininput import text_key_codes, send_virtual_keys, scancode_to_vk
 
 log = logging.getLogger("pokebot.inputbus")
 
@@ -75,6 +75,7 @@ class InputBus:
         self._focus_blocked = False
         self._text_cancellations: dict[str, threading.Event] = {}
         self._held_scancodes: set[int] = set()
+        self._pending_key_downs: dict[int, int] = {}
 
     def start(self):
         if self._running:
@@ -103,7 +104,9 @@ class InputBus:
         with self._lock:
             self._seq += 1
             seq = self._seq
-        self._queue.put((req.priority, seq, req))
+            if req.type == InputType.KEY_DOWN:
+                self._pending_key_downs[req.code] = self._pending_key_downs.get(req.code, 0) + 1
+            self._queue.put((req.priority, seq, req))
         return True
 
     def press_key(self, code: int, hold_ms: int = 50, priority: int = 10, module: str = "unknown") -> bool:
@@ -136,6 +139,11 @@ class InputBus:
             module=module,
         ))
 
+    def movement_key_active(self, code: int) -> bool:
+        scancode = code if code > 255 else self._vk_to_scancode(code)
+        with self._lock:
+            return self._pending_key_downs.get(code, 0) > 0 or scancode in self._held_scancodes
+
     def send_text(self, text: str, priority: int = 10, module: str = "unknown") -> bool:
         if not isinstance(text, str) or not text or len(text) > 1024 or not text.isprintable():
             raise ValueError("Texto deve ter de 1 a 1024 caracteres imprimíveis")
@@ -153,30 +161,59 @@ class InputBus:
             if event is not None:
                 event.set()
 
-    def _execute_text(self, req: InputRequest) -> bool:
+    def _execute_text(self, req: InputRequest, background: bool = False) -> bool:
         event = req.cancel_event or threading.Event()
         hwnd = self._get_hwnd()
-        thread_id, _ = win32process.GetWindowThreadProcessId(hwnd)
-        strokes = text_key_codes(req.text, thread_id)
-        if event.is_set() or self._ctx.is_stopped() or win32gui.GetForegroundWindow() != hwnd:
+        if not hwnd:
             return False
-        send_virtual_keys((0x0D,))
+        thread_id, _ = win32process.GetWindowThreadProcessId(hwnd)
+        strokes = list(req.text) if background else text_key_codes(req.text, thread_id)
+
+        def send(codes) -> None:
+            if background:
+                for code in codes:
+                    self._post_key(code, True)
+                    time.sleep(0.012)
+                for code in reversed(codes):
+                    self._post_key(code, False)
+                    time.sleep(0.008)
+            else:
+                send_virtual_keys(codes)
+
+        def send_character(character: str) -> None:
+            encoded = character.encode("utf-16-le")
+            for offset in range(0, len(encoded), 2):
+                unit = int.from_bytes(encoded[offset:offset + 2], "little")
+                result = win32gui.PostMessage(hwnd, win32con.WM_CHAR, unit, 1)
+                if result is not None and not result:
+                    raise OSError("Falha ao enviar caractere ao chat")
+
+        def interrupted() -> bool:
+            return (event.is_set() or self._ctx.is_stopped()
+                    or (not background and win32gui.GetForegroundWindow() != hwnd))
+
+        if interrupted():
+            return False
+        send((0x0D,))
         chat_open = True
         try:
             for keys in strokes:
                 if event.wait(0.02) or self._ctx.is_stopped():
                     return False
-                if win32gui.GetForegroundWindow() != hwnd:
+                if not background and win32gui.GetForegroundWindow() != hwnd:
                     return False
-                send_virtual_keys(keys)
-            if event.wait(0.02) or self._ctx.is_stopped() or win32gui.GetForegroundWindow() != hwnd:
+                if background:
+                    send_character(keys)
+                else:
+                    send(keys)
+            if interrupted():
                 return False
-            send_virtual_keys((0x0D,))
+            send((0x0D,))
             chat_open = False
             return True
         finally:
-            if chat_open and win32gui.GetForegroundWindow() == hwnd:
-                send_virtual_keys((0x1B,))
+            if chat_open and (background or win32gui.GetForegroundWindow() == hwnd):
+                send((0x1B,))
 
     def key_up(self, code: int, priority: int = 10, module: str = "unknown") -> bool:
         return self.submit(InputRequest(
@@ -267,14 +304,109 @@ class InputBus:
                 self._hwnd = None
             return self._hwnd
 
-    def _focus_client(self):
+    def _background_input(self) -> bool:
+        """Envia input via mensagens para a janela, sem roubar o foco.
+
+        `client.input_mode` = "background" (post) entrega WM_KEYDOWN/WM_KEYUP
+        direto para a janela do jogo, entao o bot funciona mesmo com outra
+        janela em foco. "foreground" mantem o comportamento antigo (SendInput
+        + SetForegroundWindow).
+        """
+        mode = self._ctx.get("client", "input_mode", default="foreground")
+        return str(mode).strip().lower() in ("background", "post", "message")
+
+    def _post_key(self, code: int, down: bool) -> bool:
+        """Posta WM_KEYDOWN/WM_KEYUP para o cliente sem alterar o foco."""
+        hwnd = self._get_hwnd()
+        if not hwnd:
+            return False
+        try:
+            if code > 255:
+                scan = int(code) & 0xFFFF
+                vk = int(scancode_to_vk(scan) or 0)
+                if not vk:
+                    vk = int(win32api.MapVirtualKey(scan & 0xFF, 3))
+            else:
+                vk = int(code)
+                scan = int(self._vk_to_scancode(vk))
+        except Exception as exc:  # noqa: BLE001 - mapeamento pode falhar
+            log.debug("post_key mapeamento falhou code=%s: %s", code, exc)
+            return False
+        extended = 1 if (scan >> 8) == 0xE0 else 0
+        lparam = 1 | ((scan & 0xFF) << 16) | (extended << 24)
+        if not down:
+            lparam |= 0xC0000000
+        msg = win32con.WM_KEYDOWN if down else win32con.WM_KEYUP
+        try:
+            return bool(win32gui.PostMessage(hwnd, msg, vk, lparam))
+        except Exception as exc:  # noqa: BLE001 - janela pode ter morrido
+            log.debug("PostMessage falhou: %s", exc)
+            return False
+
+    def _post_combo(self, codes: tuple[int, ...], hold_ms: float, down_pause: float,
+                    up_pause: float) -> None:
+        sent = []
+        try:
+            for code in codes:
+                if self._post_key(code, True):
+                    sent.append(code)
+                    time.sleep(down_pause)
+            time.sleep(max(float(hold_ms), 0.0) / 1000.0)
+        finally:
+            for code in reversed(sent):
+                self._post_key(code, False)
+                time.sleep(up_pause)
+
+    def _post_click(self, x: int, y: int, button: str = "left") -> bool:
+        hwnd = self._get_hwnd()
+        if not hwnd:
+            return False
+        lparam = (int(y) << 16) | (int(x) & 0xFFFF)
+        down_msg, up_msg, flag = ((win32con.WM_LBUTTONDOWN, win32con.WM_LBUTTONUP,
+                                   win32con.MK_LBUTTON) if button == "left"
+                                  else (win32con.WM_RBUTTONDOWN, win32con.WM_RBUTTONUP,
+                                        win32con.MK_RBUTTON))
+        try:
+            win32gui.PostMessage(hwnd, win32con.WM_MOUSEMOVE, 0, lparam)
+            time.sleep(0.01)
+            win32gui.PostMessage(hwnd, down_msg, flag, lparam)
+            time.sleep(0.02)
+            win32gui.PostMessage(hwnd, up_msg, 0, lparam)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.debug("post_click falhou: %s", exc)
+            return False
+
+    def _focus_enabled(self) -> bool:
+        """Politica de foco definida pelo usuario.
+
+        - focus_policy "always": rouba foco a cada input (comportamento antigo).
+        - focus_policy "manual"/"never": nunca rouba foco; o input so e entregue
+          se a janela do jogo ja estiver em foco.
+        - Sem focus_policy definido: cai no legado focus_before_input (default True).
+        """
+        policy = self._ctx.get("client", "focus_policy", default=None)
+        if policy is None:
+            return bool(self._ctx.get("client", "focus_before_input", default=True))
+        return str(policy).strip().lower() == "always"
+
+    def focus_client(self, force: bool = False) -> bool:
+        """Foca a janela do cliente.
+
+        force=True ignora a politica configurada (usado por acoes explicitas,
+        como o botao 'Forcar Foco'). Sem force, apenas rouba foco quando a
+        politica permite.
+        """
+        return self._focus_client(force=force)
+
+    def _focus_client(self, force: bool = False):
         hwnd = self._get_hwnd()
         if not hwnd:
             return False
         fg_hwnd = win32gui.GetForegroundWindow()
         if fg_hwnd == hwnd:
             return True
-        if not self._ctx.get("client", "focus_before_input", default=True):
+        if not force and not self._focus_enabled():
             return False
         try:
             # Se estiver minimizada na barra de tarefas (Iconic), restaura.
@@ -309,40 +441,67 @@ class InputBus:
         try:
             if req.cancel_event is not None and req.cancel_event.is_set():
                 return False
-            if req.type != InputType.KEY_UP and not self._focus_client():
+            background = self._background_input()
+            if background:
+                if not self._get_hwnd():
+                    return False
+            elif req.type != InputType.KEY_UP and not self._focus_client():
                 if not self._focus_blocked:
-                    log.warning("Input bloqueado: janela do PID selecionado nao esta em foco. Clique no jogo para continuar.")
+                    log.warning("Input ignorado: módulo=%s tipo=%s VK=0x%02X; janela do PID selecionado não está em foco e a política de foco não permite roubá-lo (mude 'focus_policy' ou use 'Forçar Foco').",
+                                req.module, req.type.value, req.code)
                 self._focus_blocked = True
                 return False
             self._focus_blocked = False
+            log.debug("Input: módulo=%s tipo=%s VK=0x%02X modo=%s", req.module,
+                      req.type.value, req.code, "background" if background else "foreground")
             if req.type == InputType.KEY_PRESS:
-                sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
-                self._send_scancode(sc, True)
-                try:
-                    time.sleep(max(req.hold_ms, 80.0) / 1000.0)
-                finally:
-                    self._send_scancode(sc, False)
-            elif req.type == InputType.KEY_COMBO:
-                scancodes = [c if c > 255 else self._vk_to_scancode(c) for c in req.codes]
-                for sc in scancodes:
+                if background:
+                    self._post_key(req.code, True)
+                    try:
+                        time.sleep(max(req.hold_ms, 80.0) / 1000.0)
+                    finally:
+                        self._post_key(req.code, False)
+                else:
+                    sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
                     self._send_scancode(sc, True)
-                    time.sleep(0.035)
-                try:
-                    time.sleep(max(req.hold_ms, 90.0) / 1000.0)
-                finally:
-                    for sc in reversed(scancodes):
+                    try:
+                        time.sleep(max(req.hold_ms, 80.0) / 1000.0)
+                    finally:
                         self._send_scancode(sc, False)
-                        time.sleep(0.025)
+            elif req.type == InputType.KEY_COMBO:
+                if background:
+                    self._post_combo(tuple(req.codes), max(req.hold_ms, 90.0), 0.035, 0.025)
+                else:
+                    scancodes = [c if c > 255 else self._vk_to_scancode(c) for c in req.codes]
+                    for sc in scancodes:
+                        self._send_scancode(sc, True)
+                        time.sleep(0.035)
+                    try:
+                        time.sleep(max(req.hold_ms, 90.0) / 1000.0)
+                    finally:
+                        for sc in reversed(scancodes):
+                            self._send_scancode(sc, False)
+                            time.sleep(0.025)
             elif req.type == InputType.KEY_DOWN:
-                sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
-                self._send_scancode(sc, True)
-                self._held_scancodes.add(sc)
+                if background:
+                    self._post_key(req.code, True)
+                    sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
+                else:
+                    sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
+                    self._send_scancode(sc, True)
+                with self._lock:
+                    self._held_scancodes.add(sc)
             elif req.type == InputType.KEY_UP:
-                sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
-                self._send_scancode(sc, False)
-                self._held_scancodes.discard(sc)
+                if background:
+                    self._post_key(req.code, False)
+                    sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
+                else:
+                    sc = req.code if req.code > 255 else self._vk_to_scancode(req.code)
+                    self._send_scancode(sc, False)
+                with self._lock:
+                    self._held_scancodes.discard(sc)
             elif req.type == InputType.TEXT:
-                return self._execute_text(req)
+                return self._execute_text(req, background=background)
             elif req.type == InputType.MOUSE_CLICK:
                 hwnd = self._get_hwnd()
                 if hwnd:
@@ -350,20 +509,31 @@ class InputBus:
                     rect = win32gui.GetClientRect(hwnd)
                     if not rect[0] <= req.x < rect[2] or not rect[1] <= req.y < rect[3]:
                         raise ValueError("Click outside client area")
-                    client_x, client_y = win32gui.ClientToScreen(hwnd, (req.x, req.y))
-                    win32api.SetCursorPos((client_x, client_y))
-                    time.sleep(0.01)
-                    send_mouse_button(True, button=req.button)
-                    try:
-                        time.sleep(0.02)
-                    finally:
-                        send_mouse_button(False, button=req.button)
+                    if background:
+                        self._post_click(req.x, req.y, button=req.button)
+                    else:
+                        client_x, client_y = win32gui.ClientToScreen(hwnd, (req.x, req.y))
+                        win32api.SetCursorPos((client_x, client_y))
+                        time.sleep(0.01)
+                        send_mouse_button(True, button=req.button)
+                        try:
+                            time.sleep(0.02)
+                        finally:
+                            send_mouse_button(False, button=req.button)
             else:
                 log.warning("unknown input type: %s", req.type)
+            return True
         except Exception as exc:
             log.error("input execution failed: %s", exc)
             return False
         finally:
+            if req.type == InputType.KEY_DOWN:
+                with self._lock:
+                    pending = self._pending_key_downs.get(req.code, 0) - 1
+                    if pending > 0:
+                        self._pending_key_downs[req.code] = pending
+                    else:
+                        self._pending_key_downs.pop(req.code, None)
             self._last_input_time = time.monotonic()
             if req.callback:
                 try:
@@ -384,6 +554,11 @@ class InputBus:
                 except Exception as exc:
                     log.exception("InputBus worker error: %s", exc)
         finally:
+            self._running = False
+            with self._lock:
+                self._pending_key_downs.clear()
+                while not self._queue.empty():
+                    self._queue.get_nowait()
             for scancode in tuple(self._held_scancodes):
                 try:
                     self._send_scancode(scancode, False)

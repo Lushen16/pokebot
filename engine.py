@@ -44,20 +44,24 @@ class Engine:
         self._init_modules()
 
     def _init_modules(self) -> None:
+        # Walker antes dos modulos: o Target precisa dele para pausar/retomar o combate
+        self.walker = Walker(
+            memory_reader=self.memory,
+            offset_registry=self.offsets,
+            input_bus=self.bus,
+            movement_keys=self.ctx.get("cavebot", "walk_keys", default=None),
+        )
+
         # Order matters: healer first (highest priority), alarms last (monitoring)
         self.healer = Healer(ctx=self.ctx, bus=self.bus, resolver=self.resolver)
         self.modules["healer"] = self.healer
         self.modules["auto_food"] = AutoFood(ctx=self.ctx, bus=self.bus, resolver=self.resolver)
         self.modules["cavebot"] = Cavebot(ctx=self.ctx, bus=self.bus, resolver=self.resolver)
-        self.modules["auto_target"] = AutoTarget(ctx=self.ctx, bus=self.bus, resolver=self.resolver)
+        self.modules["auto_target"] = AutoTarget(ctx=self.ctx, bus=self.bus,
+                                                 resolver=self.resolver, walker=self.walker,
+                                                 healer=self.healer)
         self.modules["auto_catch"] = AutoCatch(ctx=self.ctx, bus=self.bus, resolver=self.resolver)
         self.modules["alarms"] = Alarms(ctx=self.ctx, bus=self.bus, resolver=self.resolver)
-
-        self.walker = Walker(
-            memory_reader=self.memory,
-            offset_registry=self.offsets,
-            input_bus=self.bus,
-        )
         self.modules["walker"] = self.walker
 
     def start(self) -> None:

@@ -15,7 +15,7 @@ Atualizado em 17/10/2026. Este documento substitui as suposições desatualizada
 4. Cura do personagem usa Pokémon + move; não presumir poção.
 
 ## O que já está implementado e o que falta
-- core/pokemon_roster.py: adaptador somente leitura de telemetria local; valida PID, contrato, integridade e frescor.
+- core/pokemon_roster.py: removido em 19/10/2026 (adaptador de telemetria morto; preservado no Backup POKEBOT).
 - gui/pokemon_selector.py: seleção por UUID, escolha de cliente e atualização da lista.
 - gui/main.py: painel integrado à aba Combat; configuração nas chaves healer.heal_pokemon_uuid, healer.heal_pokemon_name e healer.heal_move.
 - IMPLEMENTADO: escolha manual fixa M1–M5; o adaptador ignora skills/cooldowns da telemetria. Seleção por UUID preservada.
@@ -61,8 +61,8 @@ Não adicionar offsets inventados nem promover candidatos a verified=true. As de
 - Module.press(vk, hold_ms=50, priority=10) delega ao inputbus. Retorno true indica aceitação na fila, não execução nem cura confirmada.
 - Config é lida via contexto/config.json; preservar atualizações da GUI.
 - inputbus.py / wininput.py usam SendInput e tentam trazer a janela ao foreground. Não prometer input em background.
-- Entry point correto: python __main__.py. Não existe main.py na raiz.
-- python __main__.py --headless pode iniciar todos os módulos habilitados, inclusive AutoFood e Alarms. Não iniciar casualmente durante diagnóstico.
+- Entry point correto: python main.py. O __main__.py duplicado foi removido em 19/10/2026.
+- python main.py --headless pode iniciar todos os módulos habilitados, inclusive AutoFood e Alarms. Não iniciar casualmente durante diagnóstico.
 - Resolver.read_field retorna None para campos ausentes/não verificados.
 
 ## Próxima retomada — ordem recomendada
@@ -78,9 +78,9 @@ cd C:\Users\yago\Desktop\pokebot
 python -m core.tools.proc_inspect PokeAlliance
 python -m core.tools.read_offset PokeAlliance_dx.exe player.hp
 python -m core.tools.read_offset PokeAlliance_dx.exe player.hp_max
-python -m pytest tests/test_pokemon_roster.py tests/test_pokemon_selector.py -q
+python -m pytest tests/test_pokemon_selector.py -q
 python -m pytest -q
-python -m compileall -q core/pokemon_roster.py gui/pokemon_selector.py gui/main.py
+python -m compileall -q gui/pokemon_selector.py gui/main.py
 ~~~
 
 ## Diagnóstico ao vivo em 17/10/2026 — falha de HP

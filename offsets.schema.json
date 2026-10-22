@@ -97,8 +97,24 @@
           "enum": [
             "assumed",
             "verified_ce",
-            "reversed_disasm"
+            "reversed_disasm",
+            "signature_scan"
           ]
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 5,
+          "pattern": "\\S"
+        },
+        "signature_disp": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4096
+        },
+        "signature_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
         },
         "mask": {
           "type": "integer",
@@ -121,13 +137,13 @@
               "verified": {
                 "const": true
               }
-            }
+            },
+            "required": [
+              "verified"
+            ]
           },
           "then": {
             "properties": {
-              "base_rva": {
-                "type": "integer"
-              },
               "terminal": {
                 "type": "integer"
               },
@@ -137,7 +153,36 @@
                   "type": "integer"
                 }
               }
-            }
+            },
+            "anyOf": [
+              {
+                "properties": {
+                  "base_rva": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "base_rva"
+                ]
+              },
+              {
+                "required": [
+                  "signature"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "signature_disp"
+            ]
+          },
+          "then": {
+            "required": [
+              "signature_length"
+            ]
           }
         },
         {

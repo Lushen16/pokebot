@@ -52,8 +52,13 @@ confirma que o jogo processou a mensagem. O chat deve estar fechado no início.
 - Falha persistente de posição: teclas liberadas após 500 ms ou 11 ticks.
 
 Safe Spot, BOX e Stair são marcadores passivos nesta etapa. Não iniciam cura,
-interações ou mudanças de andar automaticamente. Waypoints de outro andar
-não são descartados; a rota aguarda uma posição compatível.
+interações ou mudanças de andar automaticamente. Walk, BOX, Safe Spot e Wait
+ignoram Z no movimento, na gravação e na escolha do ponto mais próximo.
+Stair alinham X/Y exatos e aguardam o Z configurado antes de concluir.
+A tabela começa sem linhas quando a rota está vazia. Inclusão manual lê Z da
+memória ou usa 7; leitura inválida em Usar Posição Atual não cria coordenadas
+fictícias. Exclusão de uma linha usa Walker.remove_waypoint sob RLock, somente
+com rota e gravação paradas, e atualiza o snapshot e a numeração da tabela.
 
 ## Validação
 
@@ -92,11 +97,15 @@ combo, botões de salvar/carregar/deletar e diálogos modais parent-owned. Troca
 replace_route sob o lock do Walker; não recria timers nem liga a rota. O sinal
 healer_profile_loaded atualiza configuração e controles com QSignalBlocker.
 
-Gravação exige estabilidade de 300 ms antes de processar intervalo SQM/curvas/Z.
-Parar antes dessa confirmação descarta a posição transitória. Movimento usa
-somente uma tecla direcional por vez, priorizando X sem tolerância de chegada.
-Testes legados de espaçamento usam debounce zero; testes específicos simulam
-monotonic para verificar o padrão de 300 ms e descarte de amostras intermediárias.
+Gravação contínua processa intervalo SQM/curvas sem exigir parada no tile.
+O filtro record_stable_ms é opcional (padrão 0); se configurado, parar antes
+da confirmação descarta a posição transitória. Z só participa da estabilidade,
+deduplicação e mudança de andar para Stair. Movimento usa
+somente uma tecla direcional por vez, priorizando X. Walk aceita a tolerância
+configurada (0..2 SQM por eixo); demais ações exigem X/Y exatos.
+Testes usam as opções padrão para verificar gravação durante movimento contínuo.
+Testes específicos simulam monotonic para verificar o filtro opcional de 300 ms.
+A GUI informa quando a gravação aguarda posição válida, sem criar outro timer.
 
 
 
@@ -179,3 +188,103 @@ inválidos. O percentual é calculado antes do arredondamento visual. A legenda
 percentual fica fora da barra para manter contraste em preenchimentos curtos.
 A estilização só é reaplicada ao trocar health. Waypoints exibem ícone da ação
 na primeira coluna e tooltip textual; a ordem e os dados da rota não mudam.
+
+
+## Entrega de movimento
+
+Dashboard e Engine repassam cavebot.walk_keys para Walker; o padrão isolado
+continua WASD. O envio usa apenas um eixo de cada vez. InputBus mantém
+solicitações KEY_DOWN pendentes separadas dos scancodes efetivamente enviados.
+Walker consulta movement_key_active antes de manter seu estado local: uma
+solicitação descartada por foco ou erro permite nova tentativa, enquanto uma
+solicitação pendente não é duplicada. Encerrar o worker limpa a fila pendente,
+libera as teclas e restaura _running=False para que start possa reiniciá-lo.
+Testes usam backend Win32 simulado; não comprovam aceitação pelo jogo.
+
+
+## Retentativas e progresso
+
+O lock da rota protege os contadores de retentativa e watchdog. A GUI lê
+posição para diagnóstico sem alterar prazos de retentativa do tick. Somente
+_read_route_position agenda a próxima tentativa, usando monotonic e lotes de
+cinco leituras com intervalos 50/100/200/400 ms. read_player_position retorna
+imediatamente após uma falha e preserva a razão do primeiro campo ilegível;
+não confunde uma coordenada zero com um ponteiro nulo já rejeitado pelo resolver.
+A falha persistente libera as teclas em 500 ms ou 11 ticks sem consumir pontos.
+
+O watchdog compara apenas X/Y válidos com movimento solicitado. Após 2 s sem
+mudança, libera teclas e usa _advance_waypoint, preservando a semântica de Loop.
+Esperas intencionais e falhas de memória não contam como posição imóvel.
+Parada, nova rota e avanço reinicializam o relógio de progresso.
+
+CavebotTab reutiliza seu QTimer parent-owned de 100 ms; não cria outra thread
+nem timers por waypoint. O alerta de 5 s só observa uma rota ativa, distingue
+memória indisponível de waypoint/andar pendente e respeita wait_until. Cada
+episódio gera um log; recuperação limpa o aviso e a cor sem reiniciar workers.
+
+## Settings e atalhos globais
+
+A aba Settings persiste pause/minimize/restore em settings.hotkeys. Os campos
+usam HotkeyEdit; vazios desativam a ação. Salvar registra as combinações pelo
+RegisterHotKey com MOD_NOREPEAT e recebe WM_HOTKEY na thread da GUI. Não há
+polling de teclado, hook nem envio de teclas ao jogo para esses atalhos.
+Combinações duplicadas são rejeitadas antes de alterar registros; conflito
+com o Windows desfaz registros parciais e tenta restaurar os anteriores.
+Os registros são liberados no início do fechamento da janela.
+
+Pausar/retomar não inicia automação parada. A pausa atinge o contexto dos
+módulos e o Walker isolado, libera suas teclas e preserva a fila. A pausa
+manual é independente da pausa por combate. Minimizar não pausa; restaurar
+mostra a instância existente sem iniciar Engine ou rota. Testes usam backend
+simulado e mensagens nativas sintéticas, sem enviar comandos ao jogo.
+
+A captura e os parsers de Settings, Target e Healer compartilham core.hotkeys.
+Pontuação (incluindo = e -), navegação e Num0..Num9/NumPlus/NumMinus usam VK,
+não o código ASCII do símbolo. Plus evita ambiguidade com o separador de
+modificadores. Se o VK nativo do Windows difere do nome Qt (layouts ABNT2/US),
+a captura persiste VK_0xXX para preservar a tecla física, sem adivinhar o layout.
+Esc sozinho cancela e Delete/Backspace sozinhos limpam o campo; com modificadores
+essas teclas podem compor um atalho.
+
+No modo background, mensagens de chat usam WM_CHAR com o texto literal
+em unidades UTF-16; Enter/Escape continuam como teclas. Não simular
+Shift+1 para escrever ! nesse modo. Falha ou cancelamento fecha o chat
+sem enviar Enter de confirmação. O modo foreground mantém o caminho
+de teclas do layout do cliente. Aceitação das mensagens pelo Windows
+não comprova execução do comando dentro do jogo.
+
+No Target normal, ataque vazio permite o caminho do combo: golpes
+separados, comando de chat ou hotkey configurada. Sem texto, a hotkey
+do combo é enviada explicitamente; falha do combo não deve disparar
+F5 como ataque implícito. Uma hotkey C não representa uma sequência
+de skills por si só: depende do vínculo configurado no cliente.
+
+## Espera por distância e pausas do Walker
+
+A opção "Aguardar Pokémon distante" é independente do lure dinâmico: não
+envia comandos move nem cria desvios. Pausa quando a distância de Chebyshev
+atinge o limite superior e retoma no inferior, preservando o estado entre
+eles. A GUI exige 0 <= retomada < aguardar <= 30 SQM. Os valores ficam no
+objeto distance_guard do perfil da Hunt; perfis antigos mantêm a opção
+desligada. Salvar/carregar preserva os controles sem disparar o movimento.
+
+O recurso depende do provedor existente de posição confirmada do Pokémon;
+não cria offsets, não substitui sua posição pela do treinador e não torna
+mais confiável a identificação/cache desse provedor. Dados ausentes,
+inválidos ou em outro andar pausam a rota até uma leitura utilizável.
+
+As pausas manual, combate, distância, dados indisponíveis e watchdog têm
+motivos separados e aparecem no status. Restaurar um desvio não remove
+pausa de combate. Durante o desvio, apenas a pausa de combate é suspensa
+para permitir a movimentação temporária; pausas manual/de distância e
+watchdog continuam impedindo o movimento. O watchdog libera as teclas e
+preserva o waypoint e a ordem do loop, sem descarte automático. Para
+recuperar, conferir o obstáculo e parar/reiniciar a rota; uma retomada
+manual também reconhece a pausa do watchdog.
+
+Validação ao vivo desta etapa: primeiro testar só o Walker, com lure
+dinâmico desligado; configurar aguardar=5 e retomar=2; observar parada
+em 5, manutenção em 3/4 e retomada em 2. Repetir com pausa manual e
+combate, conferindo que retirar a espera por distância não libera essas
+pausas. Um bloqueio físico deve preservar o waypoint. Esses cenários
+estão cobertos por simulações; confirmação no jogo continua pendente.

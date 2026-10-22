@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from typing import Optional
 
 from modules.base import Module
+from core.hotkeys import resolve_key, split_hotkey
 
 log = logging.getLogger("pokebot.modules.healer")
 
@@ -55,6 +57,10 @@ def _resolve_vk(hotkey: str) -> Optional[int]:
     if key in _VK_MAP:
         return _VK_MAP[key]
     try:
+        return resolve_key(key)
+    except ValueError:
+        pass
+    try:
         code = int(key, 0)
     except ValueError as exc:
         raise ValueError(f"hotkey inválida: {hotkey!r}") from exc
@@ -70,7 +76,7 @@ def _resolve_hotkey(hotkey: str) -> list[int]:
     s = str(hotkey).strip()
     if s.upper() in ("NENHUM", "NONE", "DESATIVADO", ""):
         return []
-    parts = [p.strip() for p in s.replace("+", " ").split() if p.strip()]
+    parts = split_hotkey(s) if "+" in s else s.split()
     vk_list = []
     for part in parts:
         code = _resolve_vk(part)
@@ -91,12 +97,14 @@ class Healer(Module):
         self.log = log
         self._last_heal_ts = None
         self._last_emergency_ts = None
+        self.heal_cooldown_until = 0.0
         self.heals_sent = 0
         self.emergency_heals_sent = 0
         self.last_hp = None
         self.last_hp_max = None
         self.last_pct = None
         self.last_skip_reason = None
+        self._heal_lock = threading.RLock()
         self._load_settings()
 
     def _load_settings(self):
@@ -186,7 +194,8 @@ class Healer(Module):
             self.last_hp = 100
             self.last_hp_max = 100
             self.last_pct = 100.0
-        self._do_heal(is_emergency=False)
+        with self._heal_lock:
+            self._do_heal(is_emergency=False)
         self.log.info("[TESTE] Sequência concluída.")
 
     def _do_heal(self, is_emergency: bool) -> bool:
@@ -266,6 +275,9 @@ class Healer(Module):
         self.last_hp = None
         self.last_hp_max = None
         self.last_pct = None
+        if self.ctx and self.ctx.get("combat", "healing_in_progress", default=False):
+            self.last_skip_reason = "cura ja em andamento"
+            return
         if self.resolver is None:
             self.last_skip_reason = "resolver indisponível"
             return
@@ -277,6 +289,9 @@ class Healer(Module):
 
         if hp is None or hp_max is None:
             self.last_skip_reason = f"leitura HP falhou (player.hp={hp!r}, player.hp_max={hp_max!r})"
+        elif any(type(value) not in (int, float) or not math.isfinite(value)
+                 or value == 65535 or value > 100000 for value in (hp, hp_max)):
+            self.last_skip_reason = f"HP inválido: {hp}/{hp_max}"
         elif hp_max <= 0 or hp < 0 or hp > hp_max:
             self.last_skip_reason = f"HP inválido: {hp}/{hp_max}"
         elif hp == 0:
@@ -304,6 +319,10 @@ class Healer(Module):
                     self.last_pct, self.hp_threshold_pct,
                 )
             return
+        if (not emergency and self.ctx
+                and self.ctx.get("combat", "target_active", default=False)):
+            self.last_skip_reason = "aguardando fim do combate"
+            return
         now = time.monotonic()
         previous = self._last_emergency_ts if emergency else self._last_heal_ts
         cooldown = self.emergency_cooldown_ms if emergency else self.cooldown_ms
@@ -312,7 +331,16 @@ class Healer(Module):
             self.log.debug(self.last_skip_reason)
             return
 
-        if not self._do_heal(is_emergency=emergency):
+        if now < self.heal_cooldown_until:
+            self.last_skip_reason = "troca de Pokémon em cooldown"
+            return
+        self.heal_cooldown_until = now + 5.0
+        try:
+            with self._heal_lock:
+                accepted = self._do_heal(is_emergency=emergency)
+        finally:
+            self.heal_cooldown_until = time.monotonic() + 5.0
+        if not accepted:
             self.last_skip_reason = "fila de input recusou a cura"
             self.log.debug(self.last_skip_reason)
             return
@@ -338,6 +366,7 @@ class Healer(Module):
     def stats(self):
         return {
             "heals_sent": self.heals_sent,
+            "heal_cooldown_until": self.heal_cooldown_until,
             "emergency_heals_sent": self.emergency_heals_sent,
             "last_hp": self.last_hp,
             "last_hp_max": self.last_hp_max,

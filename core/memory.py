@@ -259,6 +259,7 @@ class MemoryReader:
         self.main_module_size: int = 0
         self.modules: Dict[str, Dict[str, int]] = {}
         self.last_error: Optional[str] = None
+        self._signature_cache: Dict[tuple, int] = {}
 
     def __enter__(self) -> MemoryReader:
         self.attach()
@@ -360,6 +361,7 @@ class MemoryReader:
         self.main_module_base = 0
         self.main_module_size = 0
         self.modules.clear()
+        self._signature_cache.clear()
 
     @property
     def is_attached(self) -> bool:
@@ -697,18 +699,60 @@ class MemoryReader:
 
         return curr
 
+    def resolve_signature_address(
+        self,
+        signature: str,
+        module_name: Optional[str] = None,
+        *,
+        disp_offset: Optional[int] = None,
+        instr_length: Optional[int] = None,
+    ) -> Optional[int]:
+        """Resolve uma assinatura de codigo para o VA alvo, com cache por sesso."""
+        key = (module_name.lower() if module_name else None, signature,
+               disp_offset, instr_length)
+        cached = self._signature_cache.get(key)
+        if cached is not None:
+            return cached
+
+        from core.signature import resolve_signature
+
+        try:
+            address = resolve_signature(
+                self, signature, module_name,
+                disp_offset=disp_offset, instr_length=instr_length,
+            )
+        except Exception as exc:  # noqa: BLE001 - scanner pode falhar de varias formas
+            log.warning("Falha ao resolver assinatura (%s): %s", module_name, exc)
+            return None
+
+        self._signature_cache[key] = address
+        return address
+
     def resolve_entry_address(self, entry: Dict[str, Any]) -> Optional[int]:
         """Resolves target memory address from a validated schema entry."""
         mod_name = entry.get("module")
-        base = self.get_module_base(mod_name)
-        if base is None:
-            return None
+        signature = entry.get("signature")
 
-        rva = entry.get("base_rva")
-        if rva is None:
-            return None
+        start_addr = None
+        if signature:
+            start_addr = self.resolve_signature_address(
+                signature,
+                mod_name,
+                disp_offset=entry.get("signature_disp"),
+                instr_length=entry.get("signature_length"),
+            )
 
-        start_addr = base + rva
+        if start_addr is None:
+            base = self.get_module_base(mod_name)
+            if base is None:
+                return None
+
+            rva = entry.get("base_rva")
+            if rva is None:
+                return None
+
+            start_addr = base + rva
+
         steps = entry.get("steps")
         terminal = entry.get("terminal", 0)
         deref = entry.get("deref", False)

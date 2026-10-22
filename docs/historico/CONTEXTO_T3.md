@@ -1,6 +1,6 @@
 # CONTEXTO T3 CODE — PokeBot (engenharia reversa + automação)
 
-> Registro histórico: contém offsets e hipóteses superados. Para retomar, use CONTEXTO_RETOMADA.md (17/10/2026), incluindo as correções sobre telemetria, UUID e M1–M5 manual.
+> Registro histórico: contém offsets e hipóteses superados. Para retomar, use ../../CONTEXTO_RETOMADA.md (17/10/2026), incluindo as correções sobre telemetria, UUID e M1–M5 manual.
 
 ## 1. Visão geral
 

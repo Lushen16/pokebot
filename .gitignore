@@ -5,6 +5,7 @@ __pycache__/
 
 # Logs e arquivos de execução
 *.log
+*.log.*
 output.txt
 scanner_*.txt
 test-summary.txt
@@ -21,8 +22,11 @@ hp-max-backup-*/
 Thumbs.db
 Desktop.ini
 
-# Dados locais de scans, telemetria e engenharia reversa de terceiros
+# Testes temporários
 .pytest_cache/
+.pytest_tmp/
+
+# Dados locais de scans, telemetria e engenharia reversa de terceiros
 pka_extract/
 _reverse/
 .env

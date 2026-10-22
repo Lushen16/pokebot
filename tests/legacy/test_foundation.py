@@ -13,6 +13,8 @@ from pe_arch import inspect_pe
 from offset_contract import validate_offsets, TYPE_FORMATS
 from types import SimpleNamespace
 
+ROOT = Path(__file__).resolve().parents[2]
+
 
 class ArchitectureTests(unittest.TestCase):
     def make_pe(self, machine, magic, name=b".text", flags=0x60000020, payload=None):
@@ -161,10 +163,10 @@ class ContractTests(unittest.TestCase):
             validate_offsets(self.data)
 
     def test_remaining_offsets_are_unverified(self):
-        path = Path(__file__).with_name("offsets.json")
+        path = ROOT / "offsets.json"
         entries = validate_offsets(json.loads(path.read_text(encoding="utf-8")))["entries"]
         entries = {name: entry for name, entry in entries.items()
-                   if name not in {"player.x", "player.y", "player.z", "player.hp", "player.hp_max", "pokemon.hp_percent", "pokemon.roster"}}
+                   if name not in {"player.x", "player.y", "player.z", "player.hp", "player.hp_max", "pokemon.hp_percent", "pokemon.roster", "world.entity_list_ptr", "world.entity_list_end"}}
         self.assertTrue(entries)
         self.assertTrue(all(not entry["verified"] for entry in entries.values()))
         self.assertTrue(all(entry["base_rva"] is None and entry["steps"] is None

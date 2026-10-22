@@ -1,4 +1,4 @@
-# pokebot/gui/main.py
+﻿# pokebot/gui/main.py
 """Main PySide6 GUI application."""
 
 from __future__ import annotations
@@ -14,12 +14,12 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QThread, QSignalBlocker, QSize
 from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QAction
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QTabWidget, QLabel, QPushButton, QGroupBox, QFormLayout,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
     QTextEdit, QListWidget, QListWidgetItem, QTableWidget,
     QTableWidgetItem, QHeaderView, QSplitter, QScrollArea,
-    QFileDialog, QMessageBox, QStatusBar, QProgressBar,
+    QFileDialog, QMessageBox, QProgressBar, QSlider,
     QTreeWidget, QTreeWidgetItem, QMenu, QSystemTrayIcon, QFrame, QLayout, QGraphicsDropShadowEffect,
 )
 
@@ -27,6 +27,9 @@ from context import get_context, BotContext
 from engine import create_engine
 from navigator import Navigator, Waypoint
 from gui.pokemon_selector import PokemonHealerSelector
+from gui.hotkey_edit import HotkeyEdit
+from gui.global_hotkeys import GlobalHotkeys, WM_HOTKEY
+from gui.settings_tab import SettingsTab
 from gui.icons import icon, set_button_icon
 
 log = logging.getLogger("pokebot.gui")
@@ -34,19 +37,19 @@ log = logging.getLogger("pokebot.gui")
 
 # ─── Theme ────────────────────────────────────────────────────────────────
 DARK_PALETTE = {
-    "bg": "#0e1117",
-    "bg_secondary": "#161b22",
-    "bg_tertiary": "#0f0f23",
-    "fg": "#c9d1d9",
-    "fg_muted": "#8b949e",
-    "accent": "#00a8ff",
-    "accent_hover": "#00eaff",
-    "green": "#00ff88",
-    "red": "#ff4444",
-    "yellow": "#ffcc00",
-    "border": "#2a2a4a",
-    "input_bg": "#1e1e3a",
-    "input_fg": "#ffffff",
+    "bg": "#070d16",
+    "bg_secondary": "#0c1927",
+    "bg_tertiary": "#0a1420",
+    "fg": "#d9e8f5",
+    "fg_muted": "#7c95ad",
+    "accent": "#22d3ee",
+    "accent_hover": "#67e8f9",
+    "green": "#34d399",
+    "red": "#fb7185",
+    "yellow": "#fbbf24",
+    "border": "#1b3145",
+    "input_bg": "#09131e",
+    "input_fg": "#ecf7ff",
 }
 
 def apply_dark_theme(app: QApplication):
@@ -65,10 +68,66 @@ def apply_dark_theme(app: QApplication):
     palette.setColor(QPalette.HighlightedText, QColor(DARK_PALETTE["bg"]))
     app.setPalette(palette)
 
-    app.setStyleSheet(Path(__file__).with_name("style.qss").read_text(encoding="utf-8"))
+    assets = Path(__file__).with_name("assets")
+    stylesheet = Path(__file__).with_name("style.qss").read_text(encoding="utf-8")
+    for token, filename in (("@CHECK_ICON@", "check.svg"),
+                            ("@TOGGLE_OFF@", "toggle_off.svg"),
+                            ("@TOGGLE_ON@", "toggle_on.svg"),
+                            ("@POKEBALL@", "pokeball.svg")):
+        stylesheet = stylesheet.replace(token, (assets / filename).as_posix())
+    app.setStyleSheet(stylesheet)
 
 
 # ─── Worker Thread ────────────────────────────────────────────────────────
+
+class ResponsiveColumns(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._panels = []
+        self._column_count = 0
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(2, 2, 2, 2)
+        self.grid.setSpacing(16)
+        self.grid.setSizeConstraint(QLayout.SetNoConstraint)
+
+    def set_panels(self, panels):
+        self._panels = list(panels)
+        self._reflow()
+
+    def minimumSizeHint(self):
+        margins = self.grid.contentsMargins()
+        width = max((panel.minimumSizeHint().width() for panel in self._panels), default=0)
+        return QSize(width + margins.left() + margins.right(), self.grid.minimumSize().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reflow()
+
+    def _reflow(self):
+        if not self._panels:
+            return
+        margins = self.grid.contentsMargins()
+        available = self.width() - margins.left() - margins.right()
+        spacing = self.grid.horizontalSpacing()
+        columns = 1
+        for candidate in range(len(self._panels), 1, -1):
+            widths = [max(panel.minimumSizeHint().width()
+                          for panel in self._panels[column::candidate])
+                      for column in range(candidate)]
+            if sum(widths) + spacing * (candidate - 1) <= available:
+                columns = candidate
+                break
+        if columns == self._column_count:
+            return
+        self._column_count = columns
+        for panel in self._panels:
+            self.grid.removeWidget(panel)
+        for column in range(len(self._panels)):
+            self.grid.setColumnStretch(column, 1 if column < columns else 0)
+        for index, panel in enumerate(self._panels):
+            self.grid.addWidget(panel, index // columns, index % columns, Qt.AlignTop)
+        self.updateGeometry()
+
 
 class QtLogBridge(logging.Handler):
     """Forwards Python logging records to a Qt Signal."""
@@ -168,6 +227,21 @@ class MainWindow(QMainWindow):
         self.status_timer.timeout.connect(self._update_status_bar)
         self.status_timer.start(100)
 
+        self._last_chat_key = None
+        self.chat_timer = QTimer(self)
+        self.chat_timer.timeout.connect(self._refresh_chat_panel)
+        self.chat_timer.start(1000)
+        self.global_hotkeys = GlobalHotkeys(int(self.winId()), {
+            "pause": self._on_pause, "minimize": self.showMinimized,
+            "restore": self._restore_window})
+        self.tab_settings.apply_requested.connect(self._apply_global_hotkeys)
+        try:
+            self.global_hotkeys.apply(self.ctx.get("settings", "hotkeys", default={}))
+            if self.global_hotkeys.bindings:
+                self.tab_settings.show_status("Atalhos salvos carregados e ativos.")
+        except ValueError as error:
+            self.tab_settings.show_status(str(error), error=True)
+
     def _setup_ui(self):
         # Central widget with tabs
         shell = QWidget(self)
@@ -183,92 +257,375 @@ class MainWindow(QMainWindow):
         # Create tabs
         self.tab_dashboard = self._create_dashboard_tab()
         self.tab_cavebot = self._create_cavebot_tab()
-        self.route_controls.addWidget(self.tab_cavebot.btn_start_route)
-        self.route_controls.addWidget(self.tab_cavebot.btn_start_nearest)
-        self.route_controls.addWidget(self.tab_cavebot.btn_stop_route)
         self.tab_targeting = self._create_targeting_tab()
-        self.tab_combat = self._create_combat_tab()
-        self.tab_cavebot.control_group.setTitle("GRAVAÇÃO E REPETIÇÃO")
-        self.tab_cavebot.control_group.layout().addWidget(QLabel("Inicie ou pare a rota pelo Dashboard."))
-        self.tab_loot = self._create_loot_tab()
-        self.tab_settings = self._create_settings_tab()
-        self.tab_debug = self._create_debug_tab()
+        self.tab_healer = self._create_healer_tab()
+        self.tab_alert = self._create_alert_tab()
+        self.tab_settings = SettingsTab(self.ctx.get("settings", "hotkeys", default={}), self)
 
         self.page_dashboard = self._scroll_page(self.tab_dashboard)
         self.page_cavebot = self._scroll_page(self.tab_cavebot)
-        self.tabs.addTab(self.page_dashboard, icon("dashboard"), "Dashboard")
-        self.tabs.addTab(self.page_cavebot, icon("map"), "Cavebot")
-        self.tabs.addTab(self.tab_targeting, icon("target"), "Alvos")
-        self.tabs.addTab(self.tab_combat, icon("target"), "Combate")
-        self.tabs.addTab(self.tab_loot, icon("loot"), "Loot")
-        self.tabs.addTab(self.tab_settings, icon("settings"), "Configurações")
-        self.tabs.addTab(self.tab_debug, icon("debug"), "Diagnóstico")
-        self.tabs.setIconSize(QSize(22, 22))
+        self.page_targeting = self._scroll_page(self.tab_targeting)
+        self.page_healer = self._scroll_page(self.tab_healer)
+        self.page_alert = self._scroll_page(self.tab_alert)
+        self.page_settings = self._scroll_page(self.tab_settings)
+        self._decorate_groups()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setIconSize(QSize(21, 21))
+        self.tabs.tabBar().setExpanding(True)
+        self.tabs.tabBar().setUsesScrollButtons(False)
+        self.tabs.tabBar().setElideMode(Qt.ElideNone)
+        self.tabs.addTab(self.page_dashboard, icon("dashboard"), "DASHBOARD")
+        self.tabs.addTab(self.page_targeting, icon("target"), "TARGETING")
+        self.tabs.addTab(self.page_healer, icon("heart"), "HEALER")
+        self.tabs.addTab(self.page_cavebot, icon("walk"), "WALKER")
+        self.tabs.addTab(self.page_alert, icon("bolt"), "ALERTAS")
+        self.tabs.addTab(self.page_settings, icon("settings"), "SETTINGS")
         self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.tabs.setCurrentIndex(1)
 
-        # Status bar
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
-        self.lbl_connection = QLabel("● Disconnected")
-        self.lbl_connection.setStyleSheet(f"color: {DARK_PALETTE['red']};")
-        self.lbl_uptime = QLabel("Uptime: 00:00:00")
-        self.status_bar.addPermanentWidget(self.lbl_connection)
-        self.status_bar.addPermanentWidget(self.lbl_uptime)
-
+        self.lbl_connection = self.lbl_header_connection
         self.btn_start = self.btn_toggle_bot
         self.btn_stop = QPushButton(self)
         self.btn_stop.hide()
-        self.btn_pause = QPushButton("PAUSAR", self.tab_dashboard)
-        set_button_icon(self.btn_pause, "pause")
-        self.btn_pause.clicked.connect(self._on_pause)
-        self.btn_pause.setEnabled(False)
-        self.route_controls.addWidget(self.btn_pause)
         self._refresh_header_processes()
+        self._populate_header_profiles()
+        self.tab_cavebot.combo_profiles.currentTextChanged.connect(self._sync_header_profile)
+        self._on_tab_changed(self.tabs.currentIndex())
 
     def _scroll_page(self, widget):
-        widget.layout().setSizeConstraint(QLayout.SetMinimumSize)
+        if isinstance(widget, QScrollArea):
+            inner = widget.widget()
+            if inner is not None and inner.layout() is not None:
+                inner.layout().setSizeConstraint(QLayout.SetMinimumSize)
+            widget.setParent(self)
+            return widget
+        layout = widget.layout()
+        if layout is not None and not isinstance(widget, ResponsiveColumns):
+            layout.setSizeConstraint(QLayout.SetMinimumSize)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(widget)
         return scroll
+
+    # ── Helpers de UI (ícones + acessibilidade) ─────────────────────────
+    def _glyph(self, parent, name, size=18, color=None):
+        label = QLabel(parent)
+        label.setPixmap(icon(name, color).pixmap(size, size))
+        label.setFixedSize(size, size)
+        label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        return label
+
+    def _icon_label(self, name, text, *, object_name="fieldLabel", size=18):
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(self._glyph(holder, name, size))
+        label = QLabel(text, holder)
+        label.setObjectName(object_name)
+        row.addWidget(label)
+        row.addStretch()
+        return holder
+
+    def _field_row(self, form, name, text, widget, hint=None):
+        holder = self._icon_label(name, text)
+        if hint:
+            holder.setToolTip(hint)
+            widget.setToolTip(hint)
+        form.addRow(holder, widget)
+        return widget
+
+    def _check_row(self, form, name, text, checkbox, hint=None):
+        checkbox.setText(text)
+        checkbox.setIcon(icon(name))
+        checkbox.setIconSize(QSize(18, 18))
+        if hint:
+            checkbox.setToolTip(hint)
+        form.addRow("", checkbox)
+        return checkbox
+
+    def _section(self, title, name, hint=None, parent=None):
+        box = QGroupBox(parent)
+        box.setObjectName("sectionCard")
+        box.setProperty("accent", True)
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(14, 12, 14, 13)
+        outer.setSpacing(7)
+        header = QWidget(box)
+        header.setObjectName("groupHeader")
+        head_row = QHBoxLayout(header)
+        head_row.setContentsMargins(0, 0, 0, 2)
+        head_row.setSpacing(10)
+        head_row.addWidget(self._glyph(header, name, 22))
+        title_label = QLabel(title, header)
+        title_label.setObjectName("sectionTitle")
+        head_row.addWidget(title_label)
+        head_row.addStretch()
+        outer.addWidget(header)
+        if hint:
+            subtitle = QLabel(hint, box)
+            subtitle.setObjectName("hint")
+            subtitle.setWordWrap(True)
+            outer.addWidget(subtitle)
+        form = QFormLayout()
+        form.setContentsMargins(0, 3, 0, 0)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(7)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        outer.addLayout(form)
+        box.form = form
+        return box
+
+    def _section_grid(self, title, name, hint=None, parent=None):
+        box = self._section(title, name, hint, parent)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 3, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(7)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        box.layout().addLayout(grid)
+        box.grid = grid
+        return box
+
+    def _grid_field(self, grid, row, column, name, text, widget, hint=None, span=1):
+        holder = QWidget()
+        layout = QVBoxLayout(holder)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        label = self._icon_label(name, text, size=15)
+        if hint:
+            holder.setToolTip(hint)
+            widget.setToolTip(hint)
+        layout.addWidget(label)
+        layout.addWidget(widget)
+        grid.addWidget(holder, row, column, 1, span)
+        return widget
+
+    def _grid_check(self, grid, row, column, name, text, checkbox, hint=None, span=2):
+        checkbox.setText(text)
+        checkbox.setIcon(icon(name))
+        checkbox.setIconSize(QSize(16, 16))
+        if hint:
+            checkbox.setToolTip(hint)
+        grid.addWidget(checkbox, row, column, 1, span)
+        return checkbox
+
+    def _panel(self, title, name, hint=None, parent=None):
+        panel = QFrame(parent)
+        panel.setObjectName("panelCard")
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(16, 15, 16, 16)
+        outer.setSpacing(11)
+        header = QHBoxLayout()
+        header.setSpacing(11)
+        badge = QLabel(panel)
+        badge.setObjectName("panelIcon")
+        badge.setFixedSize(40, 40)
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setPixmap(icon(name, DARK_PALETTE["accent"]).pixmap(23, 23))
+        header.addWidget(badge)
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        title_label = QLabel(title, panel)
+        title_label.setObjectName("panelTitle")
+        title_label.setWordWrap(True)
+        titles.addWidget(title_label)
+        if hint:
+            subtitle = QLabel(hint, panel)
+            subtitle.setObjectName("panelSubtitle")
+            subtitle.setWordWrap(True)
+            titles.addWidget(subtitle)
+        header.addLayout(titles, 1)
+        outer.addLayout(header)
+        body = QVBoxLayout()
+        body.setSpacing(10)
+        outer.addLayout(body)
+        panel.body = body
+        return panel
+
+    def _inner_card(self, title, name, parent=None):
+        card = QFrame(parent)
+        card.setObjectName("innerCard")
+        body = QVBoxLayout(card)
+        body.setContentsMargins(15, 14, 15, 15)
+        body.setSpacing(10)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(self._glyph(card, name, 18, DARK_PALETTE["accent"]))
+        label = QLabel(title, card)
+        label.setObjectName("innerTitle")
+        head.addWidget(label)
+        head.addStretch()
+        body.addLayout(head)
+        card.body = body
+        return card
+
+    def _form(self):
+        form = QFormLayout()
+        form.setContentsMargins(0, 2, 0, 0)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(9)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+        return form
+
+    GROUP_ICONS = (
+        ("automa", "dashboard"), ("session", "dashboard"), ("statistic", "dashboard"),
+        ("indicador", "dashboard"), ("personagem", "players"), ("jogador", "players"),
+        ("rota", "map"), ("waypoint", "map"), ("perfil", "map"), ("gerenciar", "map"),
+        ("posi", "range"),
+        ("atividade", "say"), ("gravacao", "record"), ("gravação", "record"),
+        ("target", "target"), ("alvo", "target"), ("combate", "combo"), ("combo", "combo"),
+        ("name filter", "filter"), ("filtro", "filter"), ("fila", "loop"),
+        ("cura", "heart"), ("food", "food"), ("captura", "catch"), ("catch", "catch"),
+        ("loot", "loot"), ("general", "sliders"), ("hotkey", "bolt"),
+        ("safety", "safe"), ("runtime", "clock"), ("scanner", "debug"), ("output", "eye"),
+    )
+
+    def _icon_for_title(self, title):
+        low = title.casefold()
+        for needle, name in self.GROUP_ICONS:
+            if needle in low:
+                return name
+        return None
+
+    def _decorate_groups(self):
+        for box in self.findChildren(QGroupBox):
+            title = box.title()
+            if not title or box.findChild(QWidget, "groupHeader") is not None:
+                continue
+            name = self._icon_for_title(title)
+            if not name:
+                continue
+            layout = box.layout()
+            if layout is None or isinstance(layout, QHBoxLayout):
+                continue
+            header = QWidget(box)
+            header.setObjectName("groupHeader")
+            row = QHBoxLayout(header)
+            row.setContentsMargins(0, 0, 0, 4)
+            row.setSpacing(10)
+            row.addWidget(self._glyph(header, name, 20))
+            label = QLabel(title, header)
+            label.setObjectName("sectionTitle")
+            row.addWidget(label)
+            row.addStretch()
+            if isinstance(layout, QFormLayout):
+                layout.insertRow(0, header)
+            else:
+                layout.insertWidget(0, header)
+            box.setTitle("")
 
     def _create_header(self, parent):
         header = QFrame(parent)
         header.setObjectName("header")
         layout = QHBoxLayout(header)
+        layout.setContentsMargins(20, 14, 18, 14)
+        layout.setSpacing(13)
+
+        mark = QFrame(header)
+        mark.setObjectName("brandMark")
+        mark.setFixedSize(62, 62)
+        mark_layout = QVBoxLayout(mark)
+        mark_layout.setContentsMargins(7, 7, 7, 7)
+        emblem = QLabel(mark)
+        emblem.setAlignment(Qt.AlignCenter)
+        emblem.setPixmap(icon("pokeball", "#eafcff").pixmap(46, 46))
+        mark_layout.addWidget(emblem)
+        logo_glow = QGraphicsDropShadowEffect(mark)
+        logo_glow.setBlurRadius(28)
+        logo_glow.setOffset(0, 0)
+        logo_glow.setColor(QColor(34, 211, 238, 120))
+        mark.setGraphicsEffect(logo_glow)
+        layout.addWidget(mark)
+
         brand = QVBoxLayout()
+        brand.setSpacing(2)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(9)
         title = QLabel("PokeBot", header)
         title.setObjectName("brand")
-        self.lbl_header_connection = QLabel("● Desconectado", header)
-        self.lbl_header_connection.setWordWrap(True)
-        brand_title = QHBoxLayout()
-        emblem = QLabel(header)
-        emblem.setPixmap(icon("power").pixmap(30, 30))
-        brand_title.addWidget(emblem)
-        brand_title.addWidget(title)
-        brand_title.addStretch()
-        brand.addLayout(brand_title)
-        brand.addWidget(self.lbl_header_connection)
+        version = QLabel("v2.0", header)
+        version.setObjectName("versionBadge")
+        title_row.addWidget(title)
+        title_row.addWidget(version)
+        title_row.addStretch()
+        brand.addLayout(title_row)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(7)
+        self.status_dot = QLabel(header)
+        self.status_dot.setObjectName("statusDot")
+        self.status_dot.setFixedSize(8, 8)
+        self.status_dot.setStyleSheet(
+            f"background: {DARK_PALETTE['fg_muted']}; border-radius: 4px;")
+        self.lbl_header_connection = QLabel("OFFLINE", header)
+        self.lbl_header_connection.setObjectName("headerStatus")
+        meta_dot = QLabel("•", header)
+        meta_dot.setObjectName("headerMetaDot")
+        self.lbl_header_process = QLabel("Nenhum cliente conectado", header)
+        self.lbl_header_process.setObjectName("headerProcess")
+        status_row.addWidget(self.status_dot)
+        status_row.addWidget(self.lbl_header_connection)
+        status_row.addWidget(meta_dot)
+        status_row.addWidget(self.lbl_header_process)
+        status_row.addStretch()
+        brand.addLayout(status_row)
+        kicker = QLabel("AUTOMAÇÃO PARA POKEALLIANCE", header)
+        kicker.setObjectName("brandKicker")
+        brand.addWidget(kicker)
         layout.addLayout(brand, 1)
+
         self.combo_processes = QComboBox(header)
-        self.combo_processes.setMinimumWidth(240)
+        self.combo_processes.setObjectName("headerCombo")
+        self.combo_processes.setMinimumWidth(195)
         self.combo_processes.setAccessibleName("Processo do jogo")
+        self.combo_processes.setToolTip("Selecionar conecta a leitura; não inicia a automação.")
         self.combo_processes.activated.connect(self._select_header_process)
         layout.addWidget(self.combo_processes)
-        self.btn_select_process = QPushButton("Atualizar Processos", header)
-        set_button_icon(self.btn_select_process, "refresh")
+
+        self.btn_select_process = QPushButton(header)
+        self.btn_select_process.setObjectName("iconButton")
+        self.btn_select_process.setFixedSize(44, 44)
+        self.btn_select_process.setAccessibleName("Atualizar processos")
+        self.btn_select_process.setToolTip("Atualizar a lista de processos do cliente.")
+        set_button_icon(self.btn_select_process, "refresh", 18)
         self.btn_select_process.clicked.connect(self._refresh_header_processes)
         layout.addWidget(self.btn_select_process)
-        self.btn_toggle_bot = QPushButton("LIGAR BOT", header)
+
+        self.combo_header_profile = QComboBox(header)
+        self.combo_header_profile.setObjectName("headerCombo")
+        self.combo_header_profile.setMinimumWidth(165)
+        self.combo_header_profile.setAccessibleName("Perfil de hunt")
+        self.combo_header_profile.setToolTip("Carregar um perfil de hunt salvo.")
+        self.combo_header_profile.addItem("Perfil: Default", "")
+        self.combo_header_profile.activated.connect(self._select_header_profile)
+        layout.addWidget(self.combo_header_profile)
+
+        self.btn_pause = QPushButton(header)
+        self.btn_pause.setObjectName("iconButton")
+        self.btn_pause.setFixedSize(46, 46)
+        self.btn_pause.setAccessibleName("Pausar automação")
+        self.btn_pause.setToolTip("Pausar automação")
+        set_button_icon(self.btn_pause, "pause", 18)
+        self.btn_pause.clicked.connect(self._on_pause)
+        self.btn_pause.setEnabled(False)
+        layout.addWidget(self.btn_pause)
+
+        self.btn_toggle_bot = QPushButton("INICIAR BOT", header)
         self.btn_toggle_bot.setObjectName("startBtn")
-        set_button_icon(self.btn_toggle_bot, "play", size=26, color="#052b1a")
+        set_button_icon(self.btn_toggle_bot, "play", size=22, color="#ffffff")
         self.master_glow = QGraphicsDropShadowEffect(self.btn_toggle_bot)
-        self.master_glow.setBlurRadius(26)
+        self.master_glow.setBlurRadius(34)
         self.master_glow.setOffset(0, 0)
-        self.master_glow.setColor(QColor(0, 230, 118, 100))
+        self.master_glow.setColor(QColor(14, 165, 233, 150))
         self.master_glow.setEnabled(False)
         self.btn_toggle_bot.setGraphicsEffect(self.master_glow)
-        self.btn_toggle_bot.setMinimumSize(205, 50)
+        self.btn_toggle_bot.setMinimumSize(176, 50)
         self.btn_toggle_bot.setEnabled(False)
         self.btn_toggle_bot.clicked.connect(self._toggle_bot)
         layout.addWidget(self.btn_toggle_bot)
@@ -291,6 +648,48 @@ class MainWindow(QMainWindow):
         except OSError as error:
             self.combo_processes.setToolTip(str(error))
         del blocker
+
+    def _populate_header_profiles(self):
+        combo = getattr(self, "combo_header_profile", None)
+        if combo is None or not hasattr(self, "tab_cavebot"):
+            return
+        current = self.tab_cavebot.active_profile or combo.currentData() or ""
+        try:
+            names = self.tab_cavebot.profile_manager.list_profiles()
+        except Exception:
+            names = []
+        blocker = QSignalBlocker(combo)
+        combo.clear()
+        combo.addItem("Perfil: Default", "")
+        for name in names:
+            combo.addItem(f"Perfil: {name}", name)
+        index = combo.findData(current)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        del blocker
+
+    def _sync_header_profile(self, name):
+        combo = getattr(self, "combo_header_profile", None)
+        if combo is None:
+            return
+        index = combo.findData(name)
+        blocker = QSignalBlocker(combo)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        del blocker
+
+    def _select_header_profile(self, index):
+        name = self.combo_header_profile.itemData(index)
+        if not name or not hasattr(self, "tab_cavebot"):
+            return
+        walker = getattr(self.tab_cavebot, "walker", None)
+        if self.worker is not None or (walker and (walker.is_running or walker.recording)):
+            self._sync_header_profile(self.tab_cavebot.combo_profiles.currentText())
+            return
+        profile_index = self.tab_cavebot.combo_profiles.findText(name)
+        if profile_index < 0:
+            self._populate_header_profiles()
+            return
+        self.tab_cavebot.combo_profiles.setCurrentIndex(profile_index)
+        self.tab_cavebot._on_load_profile()
 
     def _select_header_process(self, index):
         target = self.combo_processes.itemData(index)
@@ -350,7 +749,8 @@ class MainWindow(QMainWindow):
         from modules.walker import Walker
         self.resolver = resolver
         if not self._closing:
-            walker = Walker(memory_reader=resolver.proc, offset_registry=resolver, input_bus=get_bus())
+            walker = Walker(memory_reader=resolver.proc, offset_registry=resolver, input_bus=get_bus(),
+                            movement_keys=self.ctx.get("cavebot", "walk_keys", default=None))
             previous = self.tab_cavebot.walker
             if previous is not None:
                 route = previous.route_snapshot()
@@ -393,6 +793,7 @@ class MainWindow(QMainWindow):
             return
         self.ctx.stop_event.clear()
         self.ctx.resume()
+        self.tab_cavebot.walker.set_user_paused(False)
         self.tab_cavebot.walker.bus.start()
 
     def _receive_memory_snapshot(self, snapshot):
@@ -467,91 +868,176 @@ class MainWindow(QMainWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_tab_changed(self, index: int):
-        if hasattr(self, "tab_combat") and self.tabs.widget(index) == self.tab_combat:
+        if hasattr(self, "tab_healer") and self.tabs.widget(index) is self.page_healer:
             if hasattr(self, "pokemon_healer_selector"):
                 self.pokemon_healer_selector.detect_roster()
 
+    def _apply_global_hotkeys(self, bindings):
+        try:
+            self.global_hotkeys.apply(bindings)
+        except ValueError as error:
+            self.tab_settings.show_status(str(error), error=True)
+            return
+        self.ctx.set(dict(bindings), "settings", "hotkeys")
+        self.ctx.save_config()
+        self.tab_settings.show_status("Atalhos salvos e aplicados. Campos vazios estão desativados.")
+
+    def _restore_window(self):
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def nativeEvent(self, event_type, message):
+        if event_type in (b"windows_generic_MSG", b"windows_dispatcher_MSG") and message is not None:
+            import ctypes
+            from ctypes import wintypes
+            native_message = wintypes.MSG.from_address(int(message))
+            manager = getattr(self, "global_hotkeys", None)
+            if native_message.message == WM_HOTKEY and manager is not None and not self._closing:
+                focused = self.focusWidget()
+                if isinstance(focused, HotkeyEdit) and focused.property("capturing"):
+                    binding = manager.binding_for(native_message.wParam)
+                    if binding:
+                        focused._commit(binding)
+                        return True, 0
+                if manager.dispatch(native_message.wParam):
+                    return True, 0
+        return super().nativeEvent(event_type, message)
+
+    def _on_force_focus(self):
+        def _worker():
+            try:
+                from inputbus import get_bus
+                ok = get_bus().focus_client(force=True)
+            except Exception as exc:
+                self.ui_log.emit("ERROR", f"[FOCO] Falha ao forçar foco: {exc}")
+                return
+            if ok:
+                self.ui_log.emit("INFO", "[FOCO] Janela do jogo trazida para frente.")
+            else:
+                self.ui_log.emit("WARNING", "[FOCO] Não foi possível focar a janela do jogo.")
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _create_dashboard_tab(self) -> QWidget:
+        from gui.dashboard_tab import LiveStatusPanel
         w = QWidget()
         layout = QVBoxLayout(w)
-        heading = QLabel("Sua central de operações", w)
+        layout.setSpacing(12)
+        heading_row = QHBoxLayout()
+        heading_col = QVBoxLayout()
+        heading_col.setSpacing(3)
+        eyebrow = QLabel("OPERAÇÃO", w)
+        eyebrow.setObjectName("eyebrow")
+        heading = QLabel("Visão geral", w)
         heading.setObjectName("pageTitle")
-        layout.addWidget(heading)
-        from gui.dashboard_tab import SetupStep
-        steps = QHBoxLayout()
-        for number, title, caption, icon_name in (
-                ("01", "Conecte o cliente", "Selecione o processo no cabeçalho.", "position"),
-                ("02", "Prepare sua hunt", "Grave ou carregue uma rota no Cavebot.", "map"),
-                ("03", "Inicie a automação", "Use LIGAR BOT e acompanhe os estados.", "power")):
-            steps.addWidget(SetupStep(number, title, caption, icon_name, w), 1)
-        layout.addLayout(steps)
+        caption = QLabel("Cliente, execução e últimas mensagens em um só lugar.", w)
+        caption.setObjectName("subtitle")
+        heading_col.addWidget(eyebrow)
+        heading_col.addWidget(heading)
+        heading_col.addWidget(caption)
+        heading_row.addLayout(heading_col)
+        heading_row.addStretch()
+        layout.addLayout(heading_row)
+
         cards = QHBoxLayout()
-        layout.addLayout(cards)
-
-        # Status group
-        status_group = QGroupBox("AUTOMAÇÃO")
-        s_layout = QFormLayout(status_group)
-        self.lbl_dash_status = QLabel("STOPPED")
-        self.lbl_dash_status.setStyleSheet(f"color: {DARK_PALETTE['red']}; font-size: 18px; font-weight: bold;")
-        s_layout.addRow("Estado:", self.lbl_dash_status)
-        self.lbl_dash_uptime = QLabel("00:00:00")
-        s_layout.addRow("Uptime:", self.lbl_dash_uptime)
-        self.lbl_dash_modules = QLabel("0/6 active")
-        s_layout.addRow("Módulos:", self.lbl_dash_modules)
-        init_name = self.ctx.get("client", "process_name", default="PokeAlliance_dx.exe")
-        init_pid = self.ctx.get("client", "target_pid", default=None)
-        pid_text = f" [PID {init_pid}]" if init_pid else ""
-        self.lbl_dash_process = QLabel(f"{init_name}{pid_text}")
-        self.lbl_dash_process.setStyleSheet(f"color: {DARK_PALETTE['accent']}; font-weight: bold;")
-        s_layout.addRow("Processo:", self.lbl_dash_process)
-        self.lbl_active_profile = QLabel("Nenhuma hunt carregada")
-        self.lbl_healer_state = QLabel("Desativado")
-        self.lbl_loop_state = QLabel("Ativado")
-        s_layout.addRow("Hunt:", self.lbl_active_profile)
-        s_layout.addRow("Healer:", self.lbl_healer_state)
-        self.chk_healer_enabled = QCheckBox("Usar Healer ao ligar o bot", w)
-        self.chk_healer_enabled.setChecked(self.ctx.get("modules", "healer", "enabled", default=False))
-        self.chk_healer_enabled.toggled.connect(lambda checked: self.ctx.set(checked, "modules", "healer", "enabled"))
-        s_layout.addRow(self.chk_healer_enabled)
-        s_layout.addRow("Loop:", self.lbl_loop_state)
-        cards.addWidget(status_group, 1)
-
-        # Stats group
-        stats_group = QGroupBox("Session Statistics")
-        st_layout = QFormLayout(stats_group)
-        self.stat_labels = {}
-        for key in ["heals", "mana_heals", "food_eaten", "creatures_killed", "items_looted", "waypoints_reached", "stuck_recoveries", "deaths", "disconnects"]:
-            label = QLabel("0")
-            label.setStyleSheet(f"color: {DARK_PALETTE['accent']}; font-weight: bold;")
-            self.stat_labels[key] = label
-            st_layout.addRow(key.replace("_", " ").title() + ":", label)
-        from ui.combat_tab import CollapsibleSection
-        statistics = CollapsibleSection("Estatísticas da sessão", w)
-        stats_group.setTitle("INDICADORES")
-        statistics.content_layout.addWidget(stats_group)
-        layout.addWidget(statistics)
-
-        from gui.dashboard_tab import LiveStatusPanel
+        cards.setSpacing(16)
         self.live_panel = LiveStatusPanel(w)
         self.lbl_player_name = self.live_panel.name
         self.lbl_player_hp = self.live_panel.hp
         self.lbl_player_pos = self.live_panel.position
-        cards.insertWidget(0, self.live_panel, 1)
-        route_group = QGroupBox("CONTROLE DA ROTA", w)
-        self.route_controls = QHBoxLayout(route_group)
-        layout.addWidget(route_group)
+        cards.addWidget(self.live_panel, 5)
 
-        # Recent events log
-        log_group = QGroupBox("ATIVIDADE RECENTE · ÚLTIMAS 5 MENSAGENS")
+        summary = QGroupBox("EXECUÇÃO", w)
+        summary.setObjectName("summaryCard")
+        summary.setProperty("accent", True)
+        summary_layout = QVBoxLayout(summary)
+        summary_layout.setContentsMargins(18, 18, 18, 16)
+        summary_layout.setSpacing(12)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        self.lbl_dash_status = QLabel("SEM CONEXÃO", summary)
+        self.lbl_dash_status.setObjectName("statusHeadline")
+        status_row.addWidget(self.lbl_dash_status)
+        status_row.addStretch()
+        uptime_caption = QLabel("SESSÃO", summary)
+        uptime_caption.setObjectName("metricLabel")
+        self.lbl_dash_uptime = QLabel("00:00:00", summary)
+        self.lbl_dash_uptime.setObjectName("metricValue")
+        self.lbl_dash_uptime.setToolTip("Tempo desde que o bot foi ligado.")
+        status_row.addWidget(uptime_caption)
+        status_row.addWidget(self.lbl_dash_uptime)
+        summary_layout.addLayout(status_row)
+
+        divider = QFrame(summary)
+        divider.setObjectName("divider")
+        divider.setFrameShape(QFrame.HLine)
+        summary_layout.addWidget(divider)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(22)
+        grid.setVerticalSpacing(10)
+        init_name = self.ctx.get("client", "process_name", default="PokeAlliance_dx.exe")
+        init_pid = self.ctx.get("client", "target_pid", default=None)
+        pid_text = f" [PID {init_pid}]" if init_pid else ""
+        self.lbl_dash_process = QLabel(f"{init_name}{pid_text}", summary)
+        self.lbl_dash_process.setObjectName("metricValue")
+        self.lbl_dash_process.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_dash_modules = QLabel("0/0", summary)
+        self.lbl_dash_modules.setObjectName("metricValue")
+        self.lbl_active_profile = QLabel("Hunt sem salvar", summary)
+        self.lbl_active_profile.setObjectName("metricValue")
+        self.lbl_active_profile.setWordWrap(True)
+        self.lbl_route_state = QLabel("Parada", summary)
+        self.lbl_route_state.setObjectName("metricValue")
+        self.lbl_healer_state = QLabel("Desligado", summary)
+        self.lbl_healer_state.setObjectName("metricValue")
+        self.lbl_loop_state = QLabel("Ativado", summary)
+        self.lbl_loop_state.setObjectName("metricValue")
+
+        def add_metric(row, column, title, value):
+            label = QLabel(title.upper(), summary)
+            label.setObjectName("metricLabel")
+            grid.addWidget(label, row * 2, column)
+            grid.addWidget(value, row * 2 + 1, column)
+
+        add_metric(0, 0, "Processo", self.lbl_dash_process)
+        add_metric(1, 0, "Hunt", self.lbl_active_profile)
+        add_metric(2, 0, "Rota", self.lbl_route_state)
+        self.lbl_dash_modules.hide()
+        add_metric(1, 1, "Healer", self.lbl_healer_state)
+        add_metric(2, 1, "Loop", self.lbl_loop_state)
+        grid.setColumnStretch(0, 3)
+        grid.setColumnStretch(1, 2)
+        summary_layout.addLayout(grid)
+        summary_layout.addStretch()
+
+        controls = QHBoxLayout()
+        controls.setSpacing(10)
+        self.chk_healer_enabled = QCheckBox("Usar Healer ao ligar o bot", summary)
+        self.chk_healer_enabled.setChecked(self.ctx.get("modules", "healer", "enabled", default=False))
+        self.chk_healer_enabled.toggled.connect(lambda checked: self.ctx.set(checked, "modules", "healer", "enabled"))
+        controls.addWidget(self.chk_healer_enabled)
+        controls.addStretch()
+        summary_layout.addLayout(controls)
+        cards.addWidget(summary, 7)
+        layout.addLayout(cards)
+
+        log_group = QGroupBox("ÚLTIMAS MENSAGENS", w)
+        log_group.setObjectName("logCard")
         lg_layout = QVBoxLayout(log_group)
-        self.log_view = QTextEdit()
+        lg_layout.setContentsMargins(14, 12, 14, 12)
+        self.log_view = QTextEdit(log_group)
         self.log_view.setReadOnly(True)
         self.log_view.document().setMaximumBlockCount(5)
-        self.log_view.setMaximumHeight(150)
-        self.log_view.setFont(QFont("Consolas", 9))
+        self.log_view.setMinimumHeight(100)
+        self.log_view.setMaximumHeight(130)
+        self.log_view.setFont(QFont("Cascadia Mono", 9))
+        self.log_view.setPlaceholderText("As mensagens da execução aparecem aqui.")
         lg_layout.addWidget(self.log_view)
         layout.addWidget(log_group)
-
         layout.addStretch()
         return w
 
@@ -567,101 +1053,353 @@ class MainWindow(QMainWindow):
         return tab
 
     def _create_targeting_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
+        w = ResponsiveColumns()
 
-        # Targeting settings
-        t_group = QGroupBox("Targeting Settings")
-        t_layout = QFormLayout(t_group)
+        panel_targets = self._panel(
+            "Configuração de Alvos", "target",
+            "Defina quais criaturas serão atacadas e suas preferências.", w)
+        panel_combat = self._panel(
+            "Mecânicas de Combate & Ataque", "combo",
+            "Ajuste ataque, combo e o comportamento do lure.", w)
+        panel_recovery = self._panel(
+            "Posicionamento & Recuperação", "position",
+            "Controle a aproximação, o revive e o fim de combate.", w)
+
+        position_box = self._section(
+            "Posicionamento", "position",
+            "Aproximação, perseguição e retomada da rota.")
+        pform = position_box.form
+        combo_box = self._section(
+            "Combo", "combo",
+            "Tecla ou comando usado para disparar o combo.")
+        cmform = combo_box.form
+
+        # ── Alvo ─────────────────────────────────────────────────
+        focus_box = self._section(
+            "Alvos & Criaturas", "shiny",
+            "Por enquanto o Target ataca somente o shiny da hunt; monstros comuns são ignorados.")
+        fform = focus_box.form
+
+        self.chk_focus_shiny = QCheckBox()
+        self.chk_focus_shiny.setChecked(self.ctx.get("auto_target", "focus_shiny", default=True))
+        self.chk_focus_shiny.toggled.connect(lambda v: self.ctx.set(v, "auto_target", "focus_shiny"))
+        self._check_row(fform, "shiny", "Só atacar shiny (estrela/boss)", self.chk_focus_shiny,
+                        "O shiny tem estrela e é mais forte que os monstros comuns. "
+                        "Não depende do nome azul; os normais ficam de fora.")
+
+        add_row = QHBoxLayout()
+        add_row.setSpacing(8)
+        self.edit_new_target = QLineEdit()
+        self.edit_new_target.setPlaceholderText("Adicionar criatura à whitelist...")
+        self.edit_new_target.setAccessibleName("Nome da criatura para adicionar")
+        self.edit_new_target.returnPressed.connect(self._add_target_from_field)
+        self.btn_add_target = QPushButton("Adicionar")
+        set_button_icon(self.btn_add_target, "plus", 16)
+        self.btn_add_target.clicked.connect(self._add_target_from_field)
+        add_row.addWidget(self.edit_new_target, 1)
+        add_row.addWidget(self.btn_add_target)
+        fform.addRow("", add_row)
+        panel_targets.body.addWidget(focus_box)
+
+        # ── Combate ──────────────────────────────────────────────
+        combat_box = self._section_grid("Ataque & Combo", "bolt",
+                                        "Regras de ataque usadas quando o bot encontra um alvo.")
+        cgrid = combat_box.grid
 
         self.spin_attack_range = QSpinBox()
         self.spin_attack_range.setRange(1, 20)
+        self.spin_attack_range.setSuffix(" tiles")
         self.spin_attack_range.setValue(self.ctx.get("auto_target", "attack_range_tiles", default=7))
         self.spin_attack_range.valueChanged.connect(lambda v: self.ctx.set(v, "auto_target", "attack_range_tiles"))
-        t_layout.addRow("Attack Range (tiles):", self.spin_attack_range)
+        self._grid_field(cgrid, 0, 0, "range", "Alcance", self.spin_attack_range,
+                         "Distância máxima (em tiles) para considerar um inimigo.")
+
+        self.edit_attack_hotkey = HotkeyEdit(
+            self.ctx.get("auto_target", "attack_hotkey", default="F5"))
+        self.edit_attack_hotkey.editingFinished.connect(
+            lambda: self.ctx.set(self.edit_attack_hotkey.text().strip(), "auto_target", "attack_hotkey"))
+        self._grid_field(cgrid, 0, 1, "bolt", "Tecla de ataque", self.edit_attack_hotkey,
+                         "Tecla que ataca no cliente (a mesma usada para lutar).")
 
         self.spin_attack_cd = QSpinBox()
         self.spin_attack_cd.setRange(100, 5000)
         self.spin_attack_cd.setSingleStep(50)
+        self.spin_attack_cd.setSuffix(" ms")
         self.spin_attack_cd.setValue(self.ctx.get("auto_target", "attack_cooldown_ms", default=900))
         self.spin_attack_cd.valueChanged.connect(lambda v: self.ctx.set(v, "auto_target", "attack_cooldown_ms"))
-        t_layout.addRow("Attack Cooldown (ms):", self.spin_attack_cd)
+        self._grid_field(cgrid, 1, 0, "stopwatch", "Espera", self.spin_attack_cd,
+                         "Tempo mínimo entre dois ataques, para não spammar a hotkey.")
 
         self.combo_prioritize = QComboBox()
-        self.combo_prioritize.addItems(["lowest_hp_percent", "nearest", "highest_level"])
-        self.combo_prioritize.setCurrentText(self.ctx.get("auto_target", "prioritize", default="lowest_hp_percent"))
-        self.combo_prioritize.currentTextChanged.connect(lambda v: self.ctx.set(v, "auto_target", "prioritize"))
-        t_layout.addRow("Prioritize:", self.combo_prioritize)
-
-        self.chk_ignore_players = QCheckBox()
-        self.chk_ignore_players.setChecked(self.ctx.get("auto_target", "ignore_players", default=True))
-        self.chk_ignore_players.toggled.connect(lambda v: self.ctx.set(v, "auto_target", "ignore_players"))
-        t_layout.addRow("Ignore Players:", self.chk_ignore_players)
-
-        self.chk_ignore_npcs = QCheckBox()
-        self.chk_ignore_npcs.setChecked(self.ctx.get("auto_target", "ignore_npcs", default=True))
-        self.chk_ignore_npcs.toggled.connect(lambda v: self.ctx.set(v, "auto_target", "ignore_npcs"))
-        t_layout.addRow("Ignore NPCs:", self.chk_ignore_npcs)
-
-        self.chk_ignore_dead = QCheckBox()
-        self.chk_ignore_dead.setChecked(self.ctx.get("auto_target", "ignore_dead", default=True))
-        self.chk_ignore_dead.toggled.connect(lambda v: self.ctx.set(v, "auto_target", "ignore_dead"))
-        t_layout.addRow("Ignore Dead:", self.chk_ignore_dead)
+        for label, token in (("Mais próximo", "nearest"),
+                             ("Com menos vida", "lowest_hp_percent"),
+                             ("Maior nível", "highest_level")):
+            self.combo_prioritize.addItem(label, token)
+        current = self.ctx.get("auto_target", "prioritize", default="nearest")
+        self.combo_prioritize.setCurrentIndex(max(0, self.combo_prioritize.findData(current)))
+        self.combo_prioritize.currentIndexChanged.connect(
+            lambda i: self.ctx.set(self.combo_prioritize.itemData(i), "auto_target", "prioritize"))
+        self._grid_field(cgrid, 1, 1, "sort", "Priorizar", self.combo_prioritize,
+                         "Qual inimigo atacar primeiro quando há vários.")
 
         self.chk_chase = QCheckBox()
         self.chk_chase.setChecked(self.ctx.get("auto_target", "chase_enabled", default=False))
         self.chk_chase.toggled.connect(lambda v: self.ctx.set(v, "auto_target", "chase_enabled"))
-        t_layout.addRow("Chase Enabled:", self.chk_chase)
+        self._check_row(pform, "chase", "Perseguir o alvo", self.chk_chase,
+                        "Anda atrás do inimigo se ele sair do alcance.")
 
-        layout.addWidget(t_group)
+        self.chk_auto_target = QCheckBox()
+        self.chk_auto_target.setChecked(self.ctx.get("modules", "auto_target", "enabled", default=False))
+        self.chk_auto_target.toggled.connect(
+            lambda v: self.ctx.set(v, "modules", "auto_target", "enabled"))
+        self._grid_check(cgrid, 2, 0, "bolt", "Combate automático", self.chk_auto_target,
+                         "Ataca e freia a rota quando aparece um inimigo ao alcance. "
+                         "Religue o bot para aplicar.")
 
-        # Whitelist/Blacklist
-        wl_group = QGroupBox("Name Filters")
-        wl_layout = QHBoxLayout(wl_group)
+        self.spin_combat_resume = QSpinBox()
+        self.spin_combat_resume.setRange(0, 10000)
+        self.spin_combat_resume.setSingleStep(100)
+        self.spin_combat_resume.setSuffix(" ms")
+        self.spin_combat_resume.setValue(
+            self.ctx.get("auto_target", "combat_resume_delay_ms", default=1500))
+        self.spin_combat_resume.valueChanged.connect(
+            lambda v: self.ctx.set(v, "auto_target", "combat_resume_delay_ms"))
+        self._field_row(pform, "stopwatch", "Retomar rota", self.spin_combat_resume,
+                        "Tempo parado após o último alvo antes de voltar a andar.")
+        panel_recovery.body.addWidget(position_box)
+        panel_combat.body.addWidget(combat_box)
 
-        wl_left = QVBoxLayout()
-        wl_left.addWidget(QLabel("Whitelist (empty = all)"))
+        # ── Lure e Combo ─────────────────────────────────────────
+        lure_box = self._section_grid("Perfect Lure", "lure",
+                                      "Perfect Lure: o walker junta bichos até atingir a quantidade e "
+                                      "espera eles chegarem perto do seu Pokémon antes de combar.")
+        lgrid = lure_box.grid
+
+        self.chk_perfect_lure = QCheckBox()
+        self.chk_perfect_lure.setChecked(self.ctx.get("auto_target", "perfect_lure_enabled", default=True))
+        self.chk_perfect_lure.toggled.connect(lambda v: self.ctx.set(v, "auto_target", "perfect_lure_enabled"))
+        self._grid_check(lgrid, 0, 0, "target", "Perfect Lure", self.chk_perfect_lure,
+                         "Junta os bichos e só comba quando o grupo estiver reunido "
+                         "(ou quando o HP do Pokémon cair).")
+
+        self.spin_min_lure = QSpinBox()
+        self.spin_min_lure.setRange(1, 50)
+        self.spin_min_lure.setSuffix(" bichos")
+        self.spin_min_lure.setValue(self.ctx.get("auto_target", "min_monsters_to_lure", default=8))
+        self.spin_min_lure.valueChanged.connect(
+            lambda v: self.ctx.set(v, "auto_target", "min_monsters_to_lure"))
+        self._grid_field(lgrid, 1, 0, "target", "Mínimo de bichos", self.spin_min_lure,
+                         "Quantos bichos reunir antes de parar e combar.")
+
+        self.spin_lure_radius_sqm = QSpinBox()
+        self.spin_lure_radius_sqm.setRange(1, 20)
+        self.spin_lure_radius_sqm.setSuffix(" SQM")
+        self.spin_lure_radius_sqm.setValue(self.ctx.get("auto_target", "lure_radius_sqm", default=1))
+        self.spin_lure_radius_sqm.valueChanged.connect(
+            lambda v: self.ctx.set(v, "auto_target", "lure_radius_sqm"))
+        self._grid_field(lgrid, 1, 1, "range", "Raio do grupo", self.spin_lure_radius_sqm,
+                         "Distância do Pokémon que conta como “perto” para o grupo.")
+
+        self.spin_emergency_hp = QSpinBox()
+        self.spin_emergency_hp.setRange(1, 100)
+        self.spin_emergency_hp.setSuffix(" %")
+        self.spin_emergency_hp.setValue(self.ctx.get("auto_target", "emergency_hp_percent", default=40))
+        self.spin_emergency_hp.valueChanged.connect(
+            lambda v: self.ctx.set(v, "auto_target", "emergency_hp_percent"))
+        hp_holder = QWidget()
+        hp_row = QHBoxLayout(hp_holder)
+        hp_row.setContentsMargins(0, 0, 0, 0)
+        hp_row.setSpacing(9)
+        self.slider_emergency_hp = QSlider(Qt.Horizontal)
+        self.slider_emergency_hp.setRange(1, 100)
+        self.slider_emergency_hp.setValue(self.spin_emergency_hp.value())
+        self.slider_emergency_hp.setAccessibleName("HP de emergência")
+        self.slider_emergency_hp.valueChanged.connect(self.spin_emergency_hp.setValue)
+        self.spin_emergency_hp.valueChanged.connect(self.slider_emergency_hp.setValue)
+        hp_row.addWidget(self.spin_emergency_hp, 1)
+        hp_row.addWidget(self.slider_emergency_hp, 2)
+        self._grid_field(lgrid, 2, 0, "heart", "HP de emergência", hp_holder,
+                         "Se o HP do Pokémon cair abaixo disso, comba na hora, mesmo sem o grupo.")
+
+        self.spin_max_lure_wait = QSpinBox()
+        self.spin_max_lure_wait.setRange(2500, 5000)
+        self.spin_max_lure_wait.setSingleStep(250)
+        self.spin_max_lure_wait.setSuffix(" ms")
+        self.spin_max_lure_wait.setValue(self.ctx.get("auto_target", "max_lure_wait_ms", default=2500))
+        self.spin_max_lure_wait.setToolTip(
+            "Espera maxima para o grupo fechar. Ao atingir, comba mesmo sem todos os monstros.")
+        self.spin_max_lure_wait.valueChanged.connect(
+            lambda v: self.ctx.set(v, "auto_target", "max_lure_wait_ms"))
+        self._grid_field(lgrid, 2, 1, "clock", "Espera máxima", self.spin_max_lure_wait,
+                         "Tempo máximo reunindo antes de combar de qualquer forma.")
+
+        self.spin_group_stable = QSpinBox()
+        self.spin_group_stable.setRange(0, 1000)
+        self.spin_group_stable.setSingleStep(50)
+        self.spin_group_stable.setSuffix(" ms")
+        self.spin_group_stable.setValue(self.ctx.get("auto_target", "group_stable_ms", default=300))
+        self.spin_group_stable.valueChanged.connect(
+            lambda v: self.ctx.set(v, "auto_target", "group_stable_ms"))
+        self._grid_field(lgrid, 3, 0, "clock", "Grupo estável", self.spin_group_stable,
+                         "Tempo que o grupo precisa ficar estável antes de combar.")
+
+        self.edit_combo_hotkey = HotkeyEdit(self.ctx.get("auto_target", "combo_hotkey", default="F5"))
+        self.edit_combo_hotkey.setPlaceholderText("ex: F5")
+        self.edit_combo_hotkey.editingFinished.connect(
+            lambda: self.ctx.set(self.edit_combo_hotkey.text().strip(), "auto_target", "combo_hotkey"))
+        self._field_row(cmform, "combo", "Tecla do combo", self.edit_combo_hotkey,
+                        "Tecla que dispara o combo no jogo (ex: F5).")
+
+        self.edit_combo_command = QLineEdit(self.ctx.get("auto_target", "combo_command", default=""))
+        self.edit_combo_command.setPlaceholderText("ex: !autocombo (vazio = usa a tecla)")
+        self.edit_combo_command.editingFinished.connect(
+            lambda: self.ctx.set(self.edit_combo_command.text().strip(), "auto_target", "combo_command"))
+        self._field_row(cmform, "say", "Comando do combo", self.edit_combo_command,
+                        "Se preenchido, digita no chat em vez de apertar a tecla (ex: !autocombo).")
+
+        self.spin_combo_repeat = QSpinBox()
+        self.spin_combo_repeat.setRange(1, 10)
+        self.spin_combo_repeat.setSuffix("x")
+        self.spin_combo_repeat.setValue(self.ctx.get("auto_target", "combo_repeat_count", default=3))
+        self.spin_combo_repeat.valueChanged.connect(
+            lambda v: self.ctx.set(v, "auto_target", "combo_repeat_count"))
+        self._field_row(cmform, "refresh", "Repetir comando", self.spin_combo_repeat,
+                        "Quantas vezes mandar o AutoCombo por combate (padr?o 3).")
+
+        self.spin_combo_repeat_interval = QSpinBox()
+        self.spin_combo_repeat_interval.setRange(1000, 5000)
+        self.spin_combo_repeat_interval.setSingleStep(250)
+        self.spin_combo_repeat_interval.setSuffix(" ms")
+        self.spin_combo_repeat_interval.setValue(
+            self.ctx.get("auto_target", "combo_repeat_interval_ms", default=2000))
+        self.spin_combo_repeat_interval.valueChanged.connect(
+            lambda v: self.ctx.set(v, "auto_target", "combo_repeat_interval_ms"))
+        self._field_row(cmform, "clock", "Intervalo do combo", self.spin_combo_repeat_interval,
+                        "Intervalo entre os envios. 2000ms = 3 envios em ~4 segundos.")
+
+        self.edit_combo_spellwords = QLineEdit(
+            self.ctx.get("auto_target", "combo_spellwords", default=""))
+        self.edit_combo_spellwords.setPlaceholderText("ex: m1 m2 m3 (sem v?rgula)")
+        self.edit_combo_spellwords.editingFinished.connect(
+            lambda: self.ctx.set(self.edit_combo_spellwords.text().strip(),
+                                 "auto_target", "combo_spellwords"))
+        self._field_row(cmform, "bolt", "Golpes separados", self.edit_combo_spellwords,
+                        "Se preenchido, envia cada golpe em uma mensagem separada; "
+                        "o AutoCombo n?o ? usado. N?o use v?rgula.")
+
+        self.spin_combo_wait = QSpinBox()
+        self.spin_combo_wait.setRange(50, 1000)
+        self.spin_combo_wait.setSingleStep(50)
+        self.spin_combo_wait.setSuffix(" ms")
+        self.spin_combo_wait.setValue(self.ctx.get("auto_target", "combo_wait_ms", default=1000))
+        self.spin_combo_wait.valueChanged.connect(lambda v: self.ctx.set(v, "auto_target", "combo_wait_ms"))
+        self._grid_field(lgrid, 3, 1, "clock", "Após o combo", self.spin_combo_wait,
+                         "Tempo para o combo fazer efeito antes de checar se os bichos morreram.")
+
+        panel_combat.body.addWidget(lure_box)
+        panel_recovery.body.addWidget(combo_box)
+
+        # ── Revive ───────────────────────────────────────────────
+        revive_box = self._section("Revive & Fim de Combate", "revive",
+                                   "Usado quando ainda sobram inimigos ou o seu Pokémon morre.")
+        rform = revive_box.form
+
+        self.edit_revive_hotkey = HotkeyEdit(self.ctx.get("auto_target", "revive_hotkey", default="Shift+F"))
+        self.edit_revive_hotkey.setPlaceholderText("ex: Shift+F")
+        self.edit_revive_hotkey.editingFinished.connect(
+            lambda: self.ctx.set(self.edit_revive_hotkey.text().strip(), "auto_target", "revive_hotkey"))
+        self._field_row(rform, "revive", "Tecla do revive", self.edit_revive_hotkey,
+                        "Combinação de teclas que revive o Pokémon (ex: Shift+F).")
+
+        self.spin_revive_delay = QSpinBox()
+        self.spin_revive_delay.setRange(50, 5000)
+        self.spin_revive_delay.setSingleStep(50)
+        self.spin_revive_delay.setSuffix(" ms")
+        self.spin_revive_delay.setValue(self.ctx.get("auto_target", "revive_delay_ms", default=800))
+        self.spin_revive_delay.valueChanged.connect(lambda v: self.ctx.set(v, "auto_target", "revive_delay_ms"))
+        self._field_row(rform, "stopwatch", "Esperar após o revive", self.spin_revive_delay,
+                        "Tempo de espera antes de combar de novo depois do revive.")
+
+        self.spin_combat_loops = QSpinBox()
+        self.spin_combat_loops.setRange(1, 20)
+        self.spin_combat_loops.setValue(self.ctx.get("auto_target", "max_combat_loops", default=5))
+        self.spin_combat_loops.valueChanged.connect(lambda v: self.ctx.set(v, "auto_target", "max_combat_loops"))
+        self._field_row(rform, "loop", "Tentativas por combate", self.spin_combat_loops,
+                        "Limite de ciclos combo+revive antes de voltar a andar (evita travar).")
+
+        self.chk_post_revive = QCheckBox()
+        self.chk_post_revive.setChecked(self.ctx.get("auto_target", "post_combat_revive", default=True))
+        self.chk_post_revive.toggled.connect(lambda v: self.ctx.set(v, "auto_target", "post_combat_revive"))
+        self._check_row(rform, "revive", "Revive ao fim do combate", self.chk_post_revive,
+                        "Garante o Pokémon vivo antes de voltar a andar.")
+        panel_recovery.body.addWidget(revive_box)
+
+        # ── Filtros de nome ──────────────────────────────────────
+        filter_box = self._section("Criaturas Configuradas", "filter",
+                                   "Whitelist vazia = ataca tudo. Blacklist é sempre ignorada.")
+        self.edit_target_filter = QLineEdit()
+        self.edit_target_filter.setPlaceholderText("Buscar criatura...")
+        self.edit_target_filter.setAccessibleName("Buscar criatura")
+        self.edit_target_filter.textChanged.connect(self._filter_target_lists)
+        filter_box.layout().insertWidget(filter_box.layout().count() - 1, self.edit_target_filter)
+        frow = QVBoxLayout()
+        frow.setSpacing(8)
+
+        wl_col = QVBoxLayout()
         self.list_whitelist = QListWidget()
+        self.list_whitelist.setMaximumHeight(150)
+        self.list_whitelist.setToolTip("Deixe vazio para atacar qualquer criatura.")
         for name in self.ctx.get("auto_target", "name_whitelist", default=[]):
             self.list_whitelist.addItem(name)
-        wl_left.addWidget(self.list_whitelist)
+        wl_col.addWidget(self.list_whitelist)
         wl_btns = QHBoxLayout()
-        self.btn_wl_add = QPushButton("Add")
+        self.btn_wl_add = QPushButton("Adicionar")
         set_button_icon(self.btn_wl_add, "plus")
         self.btn_wl_add.clicked.connect(lambda: self._add_to_list(self.list_whitelist, "auto_target", "name_whitelist"))
-        self.btn_wl_rem = QPushButton("Remove")
+        self.btn_wl_rem = QPushButton("Remover")
         set_button_icon(self.btn_wl_rem, "trash")
         self.btn_wl_rem.clicked.connect(lambda: self._remove_from_list(self.list_whitelist, "auto_target", "name_whitelist"))
         wl_btns.addWidget(self.btn_wl_add)
         wl_btns.addWidget(self.btn_wl_rem)
-        wl_left.addLayout(wl_btns)
+        wl_col.addLayout(wl_btns)
 
-        wl_right = QVBoxLayout()
-        wl_right.addWidget(QLabel("Blacklist"))
+        bl_col = QVBoxLayout()
         self.list_blacklist = QListWidget()
+        self.list_blacklist.setMaximumHeight(150)
+        self.list_blacklist.setToolTip("Estes nomes (ou o seu Pokémon) nunca serão alvo.")
         for name in self.ctx.get("auto_target", "name_blacklist", default=[]):
             self.list_blacklist.addItem(name)
-        wl_right.addWidget(self.list_blacklist)
+        bl_col.addWidget(self.list_blacklist)
         bl_btns = QHBoxLayout()
-        self.btn_bl_add = QPushButton("Add")
+        self.btn_bl_add = QPushButton("Adicionar")
         set_button_icon(self.btn_bl_add, "plus")
         self.btn_bl_add.clicked.connect(lambda: self._add_to_list(self.list_blacklist, "auto_target", "name_blacklist"))
-        self.btn_bl_rem = QPushButton("Remove")
+        self.btn_bl_rem = QPushButton("Remover")
         set_button_icon(self.btn_bl_rem, "trash")
         self.btn_bl_rem.clicked.connect(lambda: self._remove_from_list(self.list_blacklist, "auto_target", "name_blacklist"))
         bl_btns.addWidget(self.btn_bl_add)
         bl_btns.addWidget(self.btn_bl_rem)
-        wl_right.addLayout(bl_btns)
+        bl_col.addLayout(bl_btns)
 
-        wl_layout.addLayout(wl_left)
-        wl_layout.addLayout(wl_right)
-        layout.addWidget(wl_group)
+        wl_page = QWidget()
+        wl_page.setLayout(wl_col)
+        bl_page = QWidget()
+        bl_page.setLayout(bl_col)
+        list_tabs = QTabWidget()
+        list_tabs.setObjectName("listTabs")
+        list_tabs.setMaximumHeight(252)
+        list_tabs.addTab(wl_page, icon("safe", "#3fd0ff"), "Whitelist")
+        list_tabs.addTab(bl_page, icon("players", "#ff6b81"), "Blacklist")
+        frow.addWidget(list_tabs)
+        filter_box.layout().insertLayout(filter_box.layout().count() - 1, frow)
+        panel_targets.body.addWidget(filter_box)
+        w.set_panels([panel_targets, panel_combat, panel_recovery])
         return w
 
-    def _create_combat_tab(self) -> QWidget:
+    def _create_healer_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
-        heading = QLabel("Combate e cura", w)
+        heading = QLabel("Healer", w)
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         subtitle = QLabel("Configure os Pokémon e o limite de vida. O botão mestre controla a automação.", w)
@@ -678,258 +1416,82 @@ class MainWindow(QMainWindow):
         self.pokemon_healer_selector.btn_select_client.hide()
         healer_layout.addWidget(self.pokemon_healer_selector)
         layout.addWidget(healer_card)
-        from ui.combat_tab import CollapsibleSection
-        extras = CollapsibleSection("Outras configurações · comida e captura", w)
-        layout.addWidget(extras)
-
-        # Auto-food
-        f_group = QGroupBox("Auto-Food")
-        f_layout = QFormLayout(f_group)
-
-        self.spin_food_interval = QSpinBox()
-        self.spin_food_interval.setRange(10, 600)
-        self.spin_food_interval.setValue(self.ctx.get("auto_food", "interval_seconds", default=60))
-        self.spin_food_interval.valueChanged.connect(lambda v: self.ctx.set(v, "auto_food", "interval_seconds"))
-        f_layout.addRow("Interval (seconds):", self.spin_food_interval)
-
-        self.spin_food_jitter = QSpinBox()
-        self.spin_food_jitter.setRange(0, 60)
-        self.spin_food_jitter.setValue(self.ctx.get("auto_food", "jitter_seconds", default=8))
-        self.spin_food_jitter.valueChanged.connect(lambda v: self.ctx.set(v, "auto_food", "jitter_seconds"))
-        f_layout.addRow("Jitter (seconds):", self.spin_food_jitter)
-
-        self.spin_food_pause_hp = QSpinBox()
-        self.spin_food_pause_hp.setRange(0, 99)
-        self.spin_food_pause_hp.setValue(self.ctx.get("auto_food", "pause_when_hp_below_percent", default=30))
-        self.spin_food_pause_hp.valueChanged.connect(lambda v: self.ctx.set(v, "auto_food", "pause_when_hp_below_percent"))
-        f_layout.addRow("Pause if HP Below (%):", self.spin_food_pause_hp)
-
-        extras.content_layout.addWidget(f_group)
-
-        # Auto-catch
-        c_group = QGroupBox("Auto-Catch")
-        c_layout = QFormLayout(c_group)
-
-        self.spin_catch_throws = QSpinBox()
-        self.spin_catch_throws.setRange(1, 10)
-        self.spin_catch_throws.setValue(self.ctx.get("auto_catch", "throw_count", default=3))
-        self.spin_catch_throws.valueChanged.connect(lambda v: self.ctx.set(v, "auto_catch", "throw_count"))
-        c_layout.addRow("Throw Count:", self.spin_catch_throws)
-
-        self.spin_catch_delay = QSpinBox()
-        self.spin_catch_delay.setRange(100, 5000)
-        self.spin_catch_delay.setSingleStep(50)
-        self.spin_catch_delay.setValue(self.ctx.get("auto_catch", "throw_delay_ms", default=750))
-        self.spin_catch_delay.valueChanged.connect(lambda v: self.ctx.set(v, "auto_catch", "throw_delay_ms"))
-        c_layout.addRow("Throw Delay (ms):", self.spin_catch_delay)
-
-        self.chk_only_after_kill = QCheckBox()
-        self.chk_only_after_kill.setChecked(self.ctx.get("auto_catch", "only_after_kill", default=True))
-        self.chk_only_after_kill.toggled.connect(lambda v: self.ctx.set(v, "auto_catch", "only_after_kill"))
-        c_layout.addRow("Only After Kill:", self.chk_only_after_kill)
-
-        self.spin_catch_stop_hp = QSpinBox()
-        self.spin_catch_stop_hp.setRange(1, 100)
-        self.spin_catch_stop_hp.setValue(self.ctx.get("auto_catch", "stop_when_hp_above_percent", default=60))
-        self.spin_catch_stop_hp.valueChanged.connect(lambda v: self.ctx.set(v, "auto_catch", "stop_when_hp_above_percent"))
-        c_layout.addRow("Stop If HP Above (%):", self.spin_catch_stop_hp)
-
-        extras.content_layout.addWidget(c_group)
-        layout.addStretch()
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(w)
-        return scroll
-
-    def _create_loot_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-
-        group = QGroupBox("Loot Settings")
-        g_layout = QFormLayout(group)
-
-        self.list_loot = QListWidget()
-        # Would load from config - placeholder
-        self.list_loot.addItem("Gold Coin")
-        self.list_loot.addItem("Platinum Coin")
-        self.list_loot.addItem("Health Potion")
-        g_layout.addRow("Desired Items:", self.list_loot)
-
-        loot_btns = QHBoxLayout()
-        self.btn_loot_add = QPushButton("Add")
-        self.btn_loot_rem = QPushButton("Remove")
-        loot_btns.addWidget(self.btn_loot_add)
-        loot_btns.addWidget(self.btn_loot_rem)
-        g_layout.addRow("", loot_btns)
-
-        layout.addWidget(group)
         layout.addStretch()
         return w
 
-    def _create_settings_tab(self) -> QWidget:
+    def _create_alert_tab(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
+        heading = QLabel("Alertar", w)
+        heading.setObjectName("pageTitle")
+        layout.addWidget(heading)
+        subtitle = QLabel("Avisa quando um GM ou jogador falar no chat. O som e o webhook são opcionais.", w)
+        subtitle.setObjectName("subtitle")
+        layout.addWidget(subtitle)
 
-        # General
-        gen_group = QGroupBox("General")
-        gen_layout = QFormLayout(gen_group)
+        chat_group = QGroupBox("CHAT", w)
+        chat_layout = QFormLayout(chat_group)
+        self.chk_chat_player = QCheckBox("Avisar quando um jogador falar")
+        self.chk_chat_player.setChecked(self.ctx.get("alarms", "chat_player_enabled", default=True))
+        chat_layout.addRow(self.chk_chat_player)
+        self.chk_chat_gm = QCheckBox("Avisar quando um GM falar")
+        self.chk_chat_gm.setChecked(self.ctx.get("alarms", "chat_gm_enabled", default=True))
+        chat_layout.addRow(self.chk_chat_gm)
+        self.chk_chat_ignore_self = QCheckBox("Ignorar minhas próprias mensagens")
+        self.chk_chat_ignore_self.setChecked(self.ctx.get("alarms", "chat_ignore_self", default=True))
+        chat_layout.addRow(self.chk_chat_ignore_self)
+        self.chk_chat_include_trade = QCheckBox("Incluir mensagens de trade")
+        self.chk_chat_include_trade.setChecked(self.ctx.get("alarms", "chat_include_trade", default=False))
+        chat_layout.addRow(self.chk_chat_include_trade)
+        self.spin_chat_poll = QSpinBox()
+        self.spin_chat_poll.setRange(200, 5000)
+        self.spin_chat_poll.setSingleStep(100)
+        self.spin_chat_poll.setSuffix(" ms")
+        self.spin_chat_poll.setValue(int(self.ctx.get("alarms", "chat_poll_ms", default=500)))
+        chat_layout.addRow("Intervalo de leitura:", self.spin_chat_poll)
+        self.edit_gm_patterns = QLineEdit(", ".join(self.ctx.get("alarms", "gm_name_patterns", default=[])))
+        self.edit_gm_patterns.setToolTip("Separe por vírgula. Ex.: GM, Gamemaster, GodAccess")
+        chat_layout.addRow("Nomes/padrões de GM:", self.edit_gm_patterns)
+        self.chk_chat_beep = QCheckBox("Tocar som ao receber mensagem")
+        self.chk_chat_beep.setChecked(self.ctx.get("alarms", "chat_beep", default=True))
+        chat_layout.addRow(self.chk_chat_beep)
+        self.chk_chat_webhook = QCheckBox("Enviar webhook (precisa estar habilitado no config)")
+        self.chk_chat_webhook.setChecked(self.ctx.get("alarms", "chat_webhook", default=False))
+        chat_layout.addRow(self.chk_chat_webhook)
+        layout.addWidget(chat_group)
 
-        gen_layout.addRow("Cliente:", QLabel("Seleção centralizada no cabeçalho"))
+        other_group = QGroupBox("OUTROS ALERTAS", w)
+        other_layout = QFormLayout(other_group)
+        beep_on = self.ctx.get("alarms", "beep_on", default=[])
+        self.chk_alarm_death = QCheckBox("Tocar som ao morrer")
+        self.chk_alarm_death.setChecked("death" in beep_on)
+        other_layout.addRow(self.chk_alarm_death)
+        self.chk_alarm_disconnect = QCheckBox("Tocar som ao desconectar")
+        self.chk_alarm_disconnect.setChecked("disconnect" in beep_on)
+        other_layout.addRow(self.chk_alarm_disconnect)
+        self.chk_alarm_gm = QCheckBox("Tocar som quando um GM aparecer perto")
+        self.chk_alarm_gm.setChecked("gm_detected" in beep_on)
+        other_layout.addRow(self.chk_alarm_gm)
+        layout.addWidget(other_group)
 
-        self.edit_window_title = QLineEdit(self.ctx.get("client", "window_title_pattern", default="PokeAlliance"))
-        self.edit_window_title.textChanged.connect(lambda v: self.ctx.set(v, "client", "window_title_pattern"))
-        gen_layout.addRow("Window Title Pattern:", self.edit_window_title)
+        status_group = QGroupBox("STATUS DO CHAT", w)
+        status_layout = QVBoxLayout(status_group)
+        self.lbl_chat_status = QLabel("Bot desligado.")
+        self.lbl_chat_status.setWordWrap(True)
+        status_layout.addWidget(self.lbl_chat_status)
+        self.txt_chat_log = QTextEdit()
+        self.txt_chat_log.setReadOnly(True)
+        self.txt_chat_log.setMinimumHeight(140)
+        self.txt_chat_log.setMaximumHeight(240)
+        self.txt_chat_log.setPlaceholderText("As mensagens novas aparecem aqui.")
+        status_layout.addWidget(self.txt_chat_log)
+        layout.addWidget(status_group)
 
-        self.chk_focus = QCheckBox()
-        self.chk_focus.setChecked(self.ctx.get("client", "focus_before_input", default=True))
-        self.chk_focus.toggled.connect(lambda v: self.ctx.set(v, "client", "focus_before_input"))
-        gen_layout.addRow("Focus Before Input:", self.chk_focus)
-
-        self.spin_refocus = QSpinBox()
-        self.spin_refocus.setRange(0, 1000)
-        self.spin_refocus.setValue(self.ctx.get("client", "refocus_delay_ms", default=120))
-        self.spin_refocus.valueChanged.connect(lambda v: self.ctx.set(v, "client", "refocus_delay_ms"))
-        gen_layout.addRow("Refocus Delay (ms):", self.spin_refocus)
-
-        self.spin_click_delay = QSpinBox()
-        self.spin_click_delay.setRange(0, 500)
-        self.spin_click_delay.setValue(self.ctx.get("client", "click_delay_ms", default=45))
-        self.spin_click_delay.valueChanged.connect(lambda v: self.ctx.set(v, "client", "click_delay_ms"))
-        gen_layout.addRow("Click Delay (ms):", self.spin_click_delay)
-
-        self.spin_key_delay = QSpinBox()
-        self.spin_key_delay.setRange(0, 500)
-        self.spin_key_delay.setValue(self.ctx.get("client", "key_delay_ms", default=30))
-        self.spin_key_delay.valueChanged.connect(lambda v: self.ctx.set(v, "client", "key_delay_ms"))
-        gen_layout.addRow("Key Delay (ms):", self.spin_key_delay)
-
-        layout.addWidget(gen_group)
-
-        # Hotkeys
-        hk_group = QGroupBox("Hotkeys")
-        hk_layout = QFormLayout(hk_group)
-
-        hk_map = {
-            "panic_stop": "F12",
-            "heal_hp": "F1",
-            "heal_mp": "F2",
-            "heal_panic": "F3",
-            "food": "F4",
-            "attack": "F5",
-            "catch": "F6",
-        }
-        self.hk_edits = {}
-        for key, default in hk_map.items():
-            edit = QLineEdit(self.ctx.get("hotkeys", key, default=default))
-            edit.textChanged.connect(lambda v, k=key: self.ctx.set(v, "hotkeys", k))
-            hk_layout.addRow(key.replace("_", " ").title() + ":", edit)
-            self.hk_edits[key] = edit
-
-        self.chk_global_hotkeys = QCheckBox()
-        self.chk_global_hotkeys.setChecked(self.ctx.get("hotkeys", "global_hotkeys", default=False))
-        self.chk_global_hotkeys.toggled.connect(lambda v: self.ctx.set(v, "hotkeys", "global_hotkeys"))
-        hk_layout.addRow("Global Hotkeys:", self.chk_global_hotkeys)
-
-        layout.addWidget(hk_group)
-
-        # Safety limits
-        safe_group = QGroupBox("Safety Limits")
-        safe_layout = QFormLayout(safe_group)
-
-        self.spin_max_threads = QSpinBox()
-        self.spin_max_threads.setRange(1, 16)
-        self.spin_max_threads.setValue(self.ctx.get("safety_limits", "max_threads", default=8))
-        self.spin_max_threads.valueChanged.connect(lambda v: self.ctx.set(v, "safety_limits", "max_threads"))
-        safe_layout.addRow("Max Threads:", self.spin_max_threads)
-
-        self.spin_queue_max = QSpinBox()
-        self.spin_queue_max.setRange(8, 256)
-        self.spin_queue_max.setValue(self.ctx.get("safety_limits", "input_bus_queue_max", default=32))
-        self.spin_queue_max.valueChanged.connect(lambda v: self.ctx.set(v, "safety_limits", "input_bus_queue_max"))
-        safe_layout.addRow("Input Queue Max:", self.spin_queue_max)
-
-        self.spin_mem_interval = QSpinBox()
-        self.spin_mem_interval.setRange(50, 1000)
-        self.spin_mem_interval.setValue(self.ctx.get("safety_limits", "memory_read_interval_ms", default=150))
-        self.spin_mem_interval.valueChanged.connect(lambda v: self.ctx.set(v, "safety_limits", "memory_read_interval_ms"))
-        safe_layout.addRow("Memory Read Interval (ms):", self.spin_mem_interval)
-
-        self.spin_min_input_interval = QSpinBox()
-        self.spin_min_input_interval.setRange(5, 200)
-        self.spin_min_input_interval.setValue(self.ctx.get("safety_limits", "min_interval_between_inputs_ms", default=25))
-        self.spin_min_input_interval.valueChanged.connect(lambda v: self.ctx.set(v, "safety_limits", "min_interval_between_inputs_ms"))
-        safe_layout.addRow("Min Input Interval (ms):", self.spin_min_input_interval)
-
-        layout.addWidget(safe_group)
-
-        # Runtime
-        rt_group = QGroupBox("Runtime")
-        rt_layout = QFormLayout(rt_group)
-
-        self.combo_log_level = QComboBox()
-        self.combo_log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
-        self.combo_log_level.setCurrentText(self.ctx.get("runtime", "log_level", default="INFO"))
-        self.combo_log_level.currentTextChanged.connect(lambda v: self.ctx.set(v, "runtime", "log_level"))
-        rt_layout.addRow("Log Level:", self.combo_log_level)
-
-        self.chk_stop_death = QCheckBox()
-        self.chk_stop_death.setChecked(self.ctx.get("runtime", "stop_on_death", default=True))
-        self.chk_stop_death.toggled.connect(lambda v: self.ctx.set(v, "runtime", "stop_on_death"))
-        rt_layout.addRow("Stop on Death:", self.chk_stop_death)
-
-        self.chk_stop_disc = QCheckBox()
-        self.chk_stop_disc.setChecked(self.ctx.get("runtime", "stop_on_disconnect", default=True))
-        self.chk_stop_disc.toggled.connect(lambda v: self.ctx.set(v, "runtime", "stop_on_disconnect"))
-        rt_layout.addRow("Stop on Disconnect:", self.chk_stop_disc)
-
-        layout.addWidget(rt_group)
-
-        # Save button
-        btn_save = QPushButton("Salvar configurações")
-        set_button_icon(btn_save, "save")
-        btn_save.clicked.connect(self._save_config)
-        layout.addWidget(btn_save)
+        btn_apply = QPushButton("Aplicar alertas")
+        set_button_icon(btn_apply, "save")
+        btn_apply.clicked.connect(self._save_alert_config)
+        layout.addWidget(btn_apply)
         layout.addStretch()
-        return w
-
-    def _create_debug_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-
-        # Scanner test
-        scan_group = QGroupBox("Scanner Tests")
-        scan_layout = QVBoxLayout(scan_group)
-
-        btn_scan_sections = QPushButton("Run: scanner.py sections")
-        btn_scan_sections.clicked.connect(lambda: self._run_scanner_test("sections"))
-        scan_layout.addWidget(btn_scan_sections)
-
-        # AOB origin: existing GUI debug literal; author/source not recorded.
-        # ASSUMPTION — not validated in memory; scanner searches disk only.
-        # Intended target: ASCII Player literal; not proof of a player pointer.
-        btn_scan_aob = QPushButton('Run: scanner.py aob --section .rdata "50 6C 61 79 65 72"')
-        btn_scan_aob.clicked.connect(lambda: self._run_scanner_test("aob"))
-        scan_layout.addWidget(btn_scan_aob)
-
-        btn_scan_aob_list = QPushButton("Run: scanner.py aob-list")
-        btn_scan_aob_list.clicked.connect(lambda: self._run_scanner_test("aob-list"))
-        scan_layout.addWidget(btn_scan_aob_list)
-
-        btn_mem_check = QPushButton("Run: memory.py --check")
-        btn_mem_check.clicked.connect(lambda: self._run_scanner_test("memory-check"))
-        scan_layout.addWidget(btn_mem_check)
-
-        layout.addWidget(scan_group)
-
-        # Output
-        out_group = QGroupBox("Output")
-        out_layout = QVBoxLayout(out_group)
-        self.debug_output = QTextEdit()
-        self.debug_output.setReadOnly(True)
-        self.debug_output.setFont(QFont("Consolas", 9))
-        out_layout.addWidget(self.debug_output)
-        layout.addWidget(out_group)
-
         return w
 
     def _setup_tray(self):
@@ -938,7 +1500,7 @@ class MainWindow(QMainWindow):
         self.tray.setToolTip("PokeBot")
         menu = QMenu()
         act_show = QAction("Show", self)
-        act_show.triggered.connect(self.show)
+        act_show.triggered.connect(self._restore_window)
         act_quit = QAction("Quit", self)
         act_quit.triggered.connect(self.close)
         menu.addAction(act_show)
@@ -954,6 +1516,84 @@ class MainWindow(QMainWindow):
         self.pokemon_healer_selector.save_selection()
         self.ctx.save_config()
         self._log("INFO", "Configuration saved")
+
+    def _save_alert_config(self):
+        self.ctx.set(self.chk_chat_player.isChecked(), "alarms", "chat_player_enabled")
+        self.ctx.set(self.chk_chat_gm.isChecked(), "alarms", "chat_gm_enabled")
+        self.ctx.set(self.chk_chat_ignore_self.isChecked(), "alarms", "chat_ignore_self")
+        self.ctx.set(self.chk_chat_include_trade.isChecked(), "alarms", "chat_include_trade")
+        self.ctx.set(self.chk_chat_beep.isChecked(), "alarms", "chat_beep")
+        self.ctx.set(self.chk_chat_webhook.isChecked(), "alarms", "chat_webhook")
+        self.ctx.set(int(self.spin_chat_poll.value()), "alarms", "chat_poll_ms")
+        patterns = [part.strip() for part in self.edit_gm_patterns.text().split(",") if part.strip()]
+        self.ctx.set(patterns, "alarms", "gm_name_patterns")
+        beep_on = []
+        if self.chk_alarm_death.isChecked():
+            beep_on.append("death")
+        if self.chk_alarm_disconnect.isChecked():
+            beep_on.append("disconnect")
+        if self.chk_alarm_gm.isChecked():
+            beep_on.append("gm_detected")
+        self.ctx.set(beep_on, "alarms", "beep_on")
+        self.ctx.set(True, "alarms", "chat_enabled")
+        self.ctx.save_config()
+        self._log("INFO", "Alertas salvos")
+
+    def _refresh_chat_panel(self):
+        if not hasattr(self, "lbl_chat_status"):
+            return
+        modules = getattr(self.engine, "modules", None) if self.engine is not None else None
+        alarms = modules.get("alarms") if isinstance(modules, dict) else None
+        if alarms is None:
+            self.lbl_chat_status.setText("Bot desligado. Ligue o bot para ler o chat.")
+            return
+        status = alarms.chat_status
+        if status.get("connected"):
+            self.lbl_chat_status.setText(
+                f"Chat conectado · tick {status.get('tick', 0)} · "
+                f"eventos {status.get('events', 0)} · descartados {status.get('dropped', 0)}"
+            )
+        elif status.get("last_error"):
+            self.lbl_chat_status.setText(f"Chat: {status['last_error']}")
+        else:
+            self.lbl_chat_status.setText("Chat: procurando snapshot (varredura inicial)...")
+        recent = alarms.recent_chat
+        self.txt_chat_log.setPlainText("\n".join(
+            f"{item['time']} [{'GM' if item['gm'] else 'JOGADOR'}] {item['name']}: {item['text']}"
+            for item in recent
+        ))
+        if recent:
+            latest = recent[-1]
+            key = (latest.get("time"), latest.get("name"), latest.get("text"))
+            if key != self._last_chat_key:
+                self._last_chat_key = key
+                if hasattr(self, "tray"):
+                    title = "GM" if latest.get("gm") else "Chat"
+                    self.tray.showMessage(title, f"{latest.get('name')}: {latest.get('text')}",
+                                          QSystemTrayIcon.Information, 5000)
+
+    def _add_target_from_field(self):
+        if not hasattr(self, "edit_new_target"):
+            return
+        text = self.edit_new_target.text().strip()
+        if not text:
+            return
+        current = list(self.ctx.get("auto_target", "name_whitelist", default=[]))
+        if text not in current:
+            current.append(text)
+            self.ctx.set(current, "auto_target", "name_whitelist")
+            self.list_whitelist.addItem(text)
+        self.edit_new_target.clear()
+        self._filter_target_lists()
+
+    def _filter_target_lists(self, _text=None):
+        if not hasattr(self, "edit_target_filter"):
+            return
+        needle = self.edit_target_filter.text().strip().casefold()
+        for list_widget in (self.list_whitelist, self.list_blacklist):
+            for index in range(list_widget.count()):
+                item = list_widget.item(index)
+                item.setHidden(bool(needle) and needle not in item.text().casefold())
 
     def _add_to_list(self, list_widget: QListWidget, section: str, key: str):
         from PySide6.QtWidgets import QInputDialog
@@ -1090,15 +1730,21 @@ class MainWindow(QMainWindow):
         self._log("INFO", "Stop requested")
 
     def _on_pause(self):
-        if self.engine:
-            if self.engine.ctx.is_paused():
-                self.engine.resume()
-                self.btn_pause.setText("PAUSAR")
-                set_button_icon(self.btn_pause, "pause")
-            else:
-                self.engine.pause()
-                self.btn_pause.setText("RETOMAR")
-                set_button_icon(self.btn_pause, "play")
+        walker = self.tab_cavebot.walker
+        if self._closing or not (self.worker is not None or (walker and walker.is_running)):
+            return
+        paused = not self.ctx.is_paused()
+        if self.engine is not None:
+            self.engine.pause() if paused else self.engine.resume()
+        else:
+            self.ctx.pause() if paused else self.ctx.resume()
+        if walker is not None:
+            walker.set_user_paused(paused)
+        label = "Retomar automação" if paused else "Pausar automação"
+        self.btn_pause.setToolTip(label)
+        self.btn_pause.setAccessibleName(label)
+        set_button_icon(self.btn_pause, "play" if paused else "pause")
+        self._update_status_bar()
 
     def _on_worker_finished(self):
         if hasattr(self, "_log_handler") and self._log_handler:
@@ -1109,10 +1755,10 @@ class MainWindow(QMainWindow):
             self._log_handler = None
 
         self.btn_start.setEnabled(self.resolver is not None)
-        self.btn_start.setText("LIGAR BOT")
+        self.btn_start.setText("INICIAR BOT")
         self.btn_stop.setEnabled(False)
         self.btn_pause.setEnabled(False)
-        self.btn_pause.setText("PAUSAR")
+        self.btn_pause.setToolTip("Pausar automação")
         self.worker = None
         self.worker_thread = None
         self.engine = None
@@ -1126,23 +1772,11 @@ class MainWindow(QMainWindow):
             self._memory_connected(self.resolver)
 
     def _on_status_update(self, status: dict):
-        # Dashboard
-        running = status.get("running", False)
-        self.lbl_dash_status.setText("RUNNING" if running else "STOPPED")
-        self.lbl_dash_status.setStyleSheet(
-            f"color: {DARK_PALETTE['green'] if running else DARK_PALETTE['red']}; font-size: 18px; font-weight: bold;"
-        )
-
         # Modules
         mods = status.get("modules", {})
         active = sum(1 for v in mods.values() if v)
         total = len(mods)
-        self.lbl_dash_modules.setText(f"{active}/{total} active")
-
-        # Stats
-        stats = status.get("stats", {})
-        for key, label in self.stat_labels.items():
-            label.setText(str(stats.get(key, 0)))
+        self.lbl_dash_modules.setText(f"{active}/{total}")
 
         # Navigator
         nav = status.get("navigator", {})
@@ -1151,34 +1785,67 @@ class MainWindow(QMainWindow):
     def _update_status_bar(self):
         connected = self.resolver is not None and self._memory_valid
         updating = self.resolver is not None and self._position_updating
-        self.lbl_connection.setText("● Memória conectada" if connected else "● Atualizando posição..." if updating else "● Desconectado")
-        color = DARK_PALETTE['green'] if connected else DARK_PALETTE['yellow'] if updating else DARK_PALETTE['red']
-        self.lbl_connection.setStyleSheet(f"color: {color};")
         walker = self.tab_cavebot.walker
         running = self.worker is not None or (walker is not None and walker.is_running)
-        self.btn_toggle_bot.setText("DESLIGAR BOT" if running else "LIGAR BOT")
+        paused = self.ctx.is_paused() if running else False
+        self.btn_pause.setEnabled(running and not self._closing)
+        color = DARK_PALETTE['green'] if connected else DARK_PALETTE['yellow'] if updating else DARK_PALETTE['red']
+        if connected:
+            header_state = "ONLINE"
+        elif updating:
+            header_state = "SINCRONIZANDO"
+        else:
+            header_state = "OFFLINE"
+        self.lbl_connection.setText(header_state)
+        self.lbl_connection.setStyleSheet(f"color: {color};")
+        proc_name = self.ctx.get("client", "process_name", default="PokeAlliance_dx.exe")
+        proc_pid = self.ctx.get("client", "target_pid", default=None)
+        if self.resolver is not None and getattr(getattr(self.resolver, "proc", None), "pid", None):
+            proc_pid = self.resolver.proc.pid
+        self.lbl_header_process.setText(
+            f"{proc_name} (PID {proc_pid})" if proc_pid else "Nenhum cliente conectado")
+        self.btn_toggle_bot.setText("DESLIGAR BOT" if running else "INICIAR BOT")
         object_name = "stopBtn" if running else "startBtn"
         if self.btn_toggle_bot.objectName() != object_name:
             self.btn_toggle_bot.setObjectName(object_name)
-            set_button_icon(self.btn_toggle_bot, "stop" if running else "play", size=26,
-                            color="#ffffff" if running else "#052b1a")
+            set_button_icon(self.btn_toggle_bot, "stop" if running else "play", size=22,
+                            color="#ffffff")
             self.btn_toggle_bot.style().unpolish(self.btn_toggle_bot)
             self.btn_toggle_bot.style().polish(self.btn_toggle_bot)
-        self.lbl_header_connection.setText(self.lbl_connection.text() + (" · " + self.lbl_dash_process.text() if connected else ""))
-        self.lbl_header_connection.setStyleSheet(f"color: {color};")
         self.lbl_active_profile.setText(self.tab_cavebot.active_profile or "Hunt sem salvar")
         healer_enabled = self.ctx.get("modules", "healer", "enabled", default=False)
         if self.chk_healer_enabled.isChecked() != healer_enabled:
             blocker = QSignalBlocker(self.chk_healer_enabled)
             self.chk_healer_enabled.setChecked(healer_enabled)
             del blocker
-        self.lbl_healer_state.setText("Configurado · ativo" if healer_enabled and running else "Configurado · bot desligado" if healer_enabled else "Desativado")
+        self.lbl_healer_state.setText("Habilitado" if healer_enabled else "Desligado")
         self.lbl_loop_state.setText("Ativado" if self.tab_cavebot.chk_loop.isChecked() else "Desativado")
+        if walker is None:
+            route_state = "Sem leitura"
+        elif walker.recording:
+            route_state = "Gravando"
+        elif walker.is_running and paused:
+            route_state = "Pausada"
+        elif walker.is_running:
+            route_state = "Em execução"
+        else:
+            route_state = "Parada"
+        self.lbl_route_state.setText(route_state)
         self.btn_toggle_bot.setEnabled((connected or running) and not self._closing and self._pending_target is None)
         self.master_glow.setEnabled(self.btn_toggle_bot.isEnabled() and not running)
-        self.lbl_dash_status.setStyleSheet(f"color: {DARK_PALETTE['green'] if running else DARK_PALETTE['fg_muted']}; font-size: 16px; font-weight: bold;")
-        self.lbl_dash_status.setText("BOT LIGADO" if running else "BOT DESLIGADO — leitura ativa" if connected
-                                     else "AGUARDANDO POSIÇÃO" if updating else "SEM CONEXÃO")
+        if running and paused:
+            status_text, status_color = "BOT PAUSADO", DARK_PALETTE['yellow']
+        elif running:
+            status_text, status_color = "BOT LIGADO", DARK_PALETTE['green']
+        elif connected:
+            status_text, status_color = "PRONTO PARA INICIAR", DARK_PALETTE['accent']
+        elif updating:
+            status_text, status_color = "AGUARDANDO POSIÇÃO", DARK_PALETTE['yellow']
+        else:
+            status_text, status_color = "SEM CONEXÃO", DARK_PALETTE['fg_muted']
+        self.lbl_dash_status.setText(status_text)
+        self.lbl_dash_status.setStyleSheet(f"color: {status_color};")
+        self.status_dot.setStyleSheet(f"background: {status_color}; border-radius: 4px;")
         self.btn_select_process.setEnabled(not self._closing and not running and not (walker and walker.recording)
                                            and (self.memory_thread is None or self.resolver is not None))
         self.combo_processes.setEnabled(self.btn_select_process.isEnabled())
@@ -1188,36 +1855,7 @@ class MainWindow(QMainWindow):
         hours, remainder = divmod(elapsed, 3600)
         minutes, seconds = divmod(remainder, 60)
         text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        self.lbl_uptime.setText(f"Uptime: {text}")
         self.lbl_dash_uptime.setText(text)
-
-    def _run_scanner_test(self, test: str):
-        import subprocess
-        self.debug_output.clear()
-        self.debug_output.append(f"$ Running {test}...")
-        try:
-            if test == "sections":
-                cmd = ["python", "scanner.py", "sections"]
-            elif test == "aob":
-                # AOB origin: existing GUI debug literal; author/source not recorded.
-                # ASSUMPTION — not validated in memory; scanner searches disk only.
-                # Intended target: ASCII Player literal; not proof of a player pointer.
-                cmd = ["python", "scanner.py", "aob", "--section", ".rdata", "50 6C 61 79 65 72"]
-            elif test == "aob-list":
-                cmd = ["python", "scanner.py", "aob-list"]
-            elif test == "memory-check":
-                cmd = ["python", "memory.py", "--check"]
-            else:
-                return
-            result = subprocess.run(cmd, cwd="C:\\pokebot", capture_output=True, text=True, timeout=30)
-            self.debug_output.append(result.stdout)
-            if result.stderr:
-                self.debug_output.append(f"STDERR:\n{result.stderr}")
-            self.debug_output.append(f"Exit code: {result.returncode}")
-        except subprocess.TimeoutExpired:
-            self.debug_output.append("TIMEOUT")
-        except Exception as exc:
-            self.debug_output.append(f"ERROR: {exc}")
 
     def _log(self, level: str, msg: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -1228,7 +1866,6 @@ class MainWindow(QMainWindow):
             "ERROR": DARK_PALETTE["red"],
         }.get(level, DARK_PALETTE["fg"])
         self.log_view.append(f'<span style="color:{color}">[{timestamp}] [{level}] {html.escape(msg)}</span>')
-        self.debug_output.append(f"[{timestamp}] [{level}] {msg}")
 
     def closeEvent(self, event):
         if self._allow_close:
@@ -1240,6 +1877,7 @@ class MainWindow(QMainWindow):
         event.ignore()
         if not self._closing:
             self._closing = True
+            self.global_hotkeys.close()
             self._pending_target = None
             self._on_stop()
             self.tab_cavebot.setEnabled(False)

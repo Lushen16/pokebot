@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
@@ -15,7 +16,7 @@ class ProfileManager:
         self._lock = threading.RLock()
 
     @staticmethod
-    def validate_profile(data):
+    def validate_profile(data, *, discard_origin=False):
         if not isinstance(data, dict) or not isinstance(data.get("waypoints"), list):
             raise ValueError("Perfil exige uma lista de waypoints")
         if type(data.get("loop")) is not bool:
@@ -33,17 +34,28 @@ class ProfileManager:
                 raise ValueError(f"Configuração inválida do Healer: {field}")
         from modules.walker import Walker
         arrival_tolerance = Walker.validate_arrival_tolerance(data.get("arrival_tolerance", 1))
+        distance_guard = data.get("distance_guard")
+        if distance_guard is not None:
+            if not isinstance(distance_guard, dict) or set(distance_guard) != {"enabled", "max_distance", "resume_distance"}:
+                raise ValueError("Configuração inválida de distância do Pokémon")
+            Walker.validate_distance_guard(**distance_guard)
         waypoints = []
         for waypoint in data["waypoints"]:
             if not isinstance(waypoint, dict) or any(type(waypoint.get(axis)) is not int for axis in ("x", "y", "z")):
                 raise ValueError("Waypoint exige X, Y e Z inteiros")
             if not is_valid_position(waypoint["x"], waypoint["y"], waypoint["z"]):
                 raise ValueError("Waypoint fora dos limites do mapa")
+            if discard_origin and waypoint["x"] == 0 and waypoint["y"] == 0:
+                logging.getLogger(__name__).warning("Waypoint (0, 0) descartado ao carregar perfil")
+                continue
             waypoints.append(Walker._waypoint(waypoint["x"], waypoint["y"], waypoint["z"],
                                               waypoint.get("action", "Walk"), waypoint.get("param", "")))
-        return {"waypoints": waypoints, "loop": data["loop"],
+        result = {"waypoints": waypoints, "loop": data["loop"],
                 "arrival_tolerance": arrival_tolerance,
                 "config_healer": copy.deepcopy(data.get("config_healer", {}))}
+        if distance_guard is not None:
+            result["distance_guard"] = copy.deepcopy(distance_guard)
+        return result
 
     def _read(self):
         if not self.path.exists():
@@ -60,7 +72,7 @@ class ProfileManager:
 
     def load_profile(self, name):
         with self._lock:
-            return self.validate_profile(self._read()[name])
+            return self.validate_profile(self._read()[name], discard_origin=True)
 
     def save_profile(self, name, data):
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 120:

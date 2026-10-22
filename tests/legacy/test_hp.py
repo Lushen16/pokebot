@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 from memory import Process, Resolver
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class HPTests(unittest.TestCase):

@@ -1,6 +1,7 @@
 """Native SendInput ABI. Structure alignment follows the calling Python process."""
 import ctypes
 import logging
+import time
 
 WORD = ctypes.c_uint16
 DWORD = ctypes.c_uint32
@@ -92,6 +93,11 @@ def vk_to_scancode(vk):
     return _user32().MapVirtualKeyW(vk, 4)
 
 
+def scancode_to_vk(scancode):
+    # MAPVK_VSC_TO_VK_EX
+    return _user32().MapVirtualKeyW(scancode & 0xFF, 3)
+
+
 def text_key_codes(text, thread_id=0):
     user32 = _user32()
     user32.GetKeyboardLayout.argtypes = [DWORD]
@@ -120,9 +126,27 @@ def text_key_codes(text, thread_id=0):
 
 
 def send_virtual_keys(codes):
-    events = [keyboard_event(vk=code) for code in codes]
-    events.extend(keyboard_event(vk=code, flags=KEYEVENTF_KEYUP) for code in reversed(codes))
-    send_inputs(events)
+    codes = tuple(codes)
+    if not codes:
+        return
+    modifiers, key = codes[:-1], codes[-1]
+    if not modifiers:
+        # Tecla simples: down/up no mesmo lote e rapido.
+        send_inputs([keyboard_event(vk=key),
+                     keyboard_event(vk=key, flags=KEYEVENTF_KEYUP)])
+        return
+    # Shift/Ctrl/Alt precisam de tempo para o cliente processar o estado antes
+    # do WM_CHAR. No mesmo lote o jogo le Shift solto e digita "1" em vez de "!".
+    for modifier in modifiers:
+        send_inputs([keyboard_event(vk=modifier)])
+        time.sleep(0.020)
+    send_inputs([keyboard_event(vk=key)])
+    time.sleep(0.020)
+    send_inputs([keyboard_event(vk=key, flags=KEYEVENTF_KEYUP)])
+    time.sleep(0.010)
+    for modifier in reversed(modifiers):
+        send_inputs([keyboard_event(vk=modifier, flags=KEYEVENTF_KEYUP)])
+        time.sleep(0.010)
 
 
 def send_mouse_button(down, button="left"):

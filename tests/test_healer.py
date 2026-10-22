@@ -41,6 +41,56 @@ def make_healer(monkeypatch):
     return create
 
 
+def test_healer_waits_for_combat_before_normal_heal(make_healer):
+    healer, ctx, bus, _, _, _ = make_healer(hp=100, hp_max=200)
+    original = ctx.get
+    ctx.get = lambda *keys, default=None: (
+        True if keys == ("combat", "target_active") else original(*keys, default=default))
+    healer.tick()
+    bus.press_key.assert_not_called()
+    assert healer.last_skip_reason == "aguardando fim do combate"
+
+
+def test_healer_skips_when_healing_is_already_in_progress(make_healer):
+    healer, ctx, bus, _, _, _ = make_healer(hp=100, hp_max=200)
+    original = ctx.get
+    ctx.get = lambda *keys, default=None: (
+        True if keys == ("combat", "healing_in_progress") else original(*keys, default=default))
+    healer.tick()
+    bus.press_key.assert_not_called()
+    assert healer.last_skip_reason == "cura ja em andamento"
+
+
+def test_healer_emergency_still_works_during_combat(make_healer):
+    healer, ctx, bus, _, _, _ = make_healer(hp=10, hp_max=200)
+    original = ctx.get
+    ctx.get = lambda *keys, default=None: (
+        True if keys == ("combat", "target_active") else original(*keys, default=default))
+    healer.tick()
+    assert bus.press_key.call_count >= 1
+
+
+def test_failed_heal_attempt_has_global_five_second_backoff(make_healer):
+    healer, _, bus, _, _, clock = make_healer()
+    bus.press_key.return_value = False
+    healer.tick()
+    assert bus.press_key.call_count == 1
+    clock.now = 4.999
+    healer.tick()
+    assert bus.press_key.call_count == 1
+    clock.now = 5.0
+    healer.tick()
+    assert bus.press_key.call_count == 2
+
+
+@pytest.mark.parametrize("hp,hp_max", [(65535, 100000), (1, 65535), (100001, 200000),
+                                       (float("nan"), 200), (100, float("inf"))])
+def test_corrupt_hp_never_starts_pokemon_switch(make_healer, hp, hp_max):
+    healer, _, bus, _, _, _ = make_healer(hp=hp, hp_max=hp_max)
+    healer.tick()
+    bus.press_key.assert_not_called()
+
+
 def test_hp_heals_without_reading_mp(make_healer):
     healer, ctx, bus, resolver, _, _ = make_healer()
     healer.tick()
@@ -63,6 +113,9 @@ def test_normal_cooldown_is_not_key_hold(make_healer):
     assert healer.last_skip_reason == "cura em cooldown"
     clock.now = 0.801
     healer.tick()
+    assert bus.press_key.call_count == 3
+    clock.now = 5.001
+    healer.tick()
     assert bus.press_key.call_count == 6
     assert bus.press_key.call_args_list[0] == call(0x34, 30.0, 5, module="healer")
 
@@ -80,24 +133,30 @@ def test_emergency_priority_cooldown_and_normal_reset(make_healer):
     assert bus.press_key.call_count == 3
     clock.now = 0.401
     healer.tick()
-    assert bus.press_key.call_count == 6
-    values["hp"] = 100
-    clock.now = 0.9
+    assert bus.press_key.call_count == 3
+    clock.now = 5.001
     healer.tick()
     assert bus.press_key.call_count == 6
-    clock.now = 1.202
+    values["hp"] = 100
+    clock.now = 5.9
+    healer.tick()
+    assert bus.press_key.call_count == 6
+    clock.now = 10.002
     healer.tick()
     assert bus.press_key.call_count == 9
     assert healer.stats["emergency_heals_sent"] == 2
     assert healer.stats["heals_sent"] == 1
 
 
-def test_emergency_can_interrupt_normal_cooldown(make_healer):
+def test_emergency_cannot_bypass_pokemon_switch_backoff(make_healer):
     healer, _, bus, _, values, clock = make_healer()
     healer.tick()
     assert bus.press_key.call_count == 3
     values["hp"] = 30
     clock.now = 0.1
+    healer.tick()
+    assert bus.press_key.call_count == 3
+    clock.now = 5.0
     healer.tick()
     assert bus.press_key.call_count == 6
     assert bus.press_key.call_args_list[3] == call(0x34, 50.0, 1, module="healer")
@@ -126,8 +185,8 @@ def test_threshold_boundary_is_normal_not_emergency(make_healer):
 
 
 @pytest.mark.parametrize("hp", [110, 30])
-def test_rejected_queue_does_not_count_or_start_cooldown(make_healer, hp):
-    healer, ctx, bus, _, _, _ = make_healer(hp=hp)
+def test_rejected_queue_does_not_count_but_delays_retry(make_healer, hp):
+    healer, ctx, bus, _, _, clock = make_healer(hp=hp)
     bus.press_key.return_value = False
     healer.tick()
     ctx.inc_stat.assert_not_called()
@@ -135,6 +194,9 @@ def test_rejected_queue_does_not_count_or_start_cooldown(make_healer, hp):
     assert healer._last_heal_ts is None
     assert healer._last_emergency_ts is None
     bus.press_key.return_value = True
+    healer.tick()
+    ctx.inc_stat.assert_not_called()
+    clock.now = 5.0
     healer.tick()
     ctx.inc_stat.assert_called_once_with("heals")
 
@@ -366,7 +428,7 @@ def test_reset_and_return_changes_are_observed_on_next_heal(make_healer):
         pokemon_heal_skill_hotkey="F5", pokemon_return_hotkey="2",
         pokemon_reset_hotkey="F8", pokemon_reset_delay_ms=400,
     )
-    clock.now = 2.0
+    clock.now = 5.0
     healer.tick()
     assert [request.args[0] for request in bus.press_key.call_args_list] == [0x36, 0x74, 0x77, 0x32]
     assert healer.heal_pokemon_name == "Outro Pokemon"

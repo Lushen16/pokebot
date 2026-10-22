@@ -13,7 +13,7 @@ from offset_contract import validate_offsets
 import position_reader
 import validate_position
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class PositionResolverTests(unittest.TestCase):
@@ -31,21 +31,21 @@ class PositionResolverTests(unittest.TestCase):
         self.resolver = memory.Resolver(self.proc, str(ROOT / "offsets.json"), str(ROOT / "config.json"))
 
     def test_resolve_xyz_offsets(self):
-        for axis, terminal in (("x", 0x28), ("y", 0x2C), ("z", 0x30)):
+        for axis, terminal in (("x", 0x20), ("y", 0x24), ("z", 0x28)):
             with self.subTest(axis=axis):
                 entry = self.resolver.entries["player." + axis]
                 self.assertEqual(entry["module"], "PokeAlliance_dx.exe")
-                self.assertEqual(entry["base_rva"], 0x3904CA8)
+                self.assertEqual(entry["base_rva"], 0x38FADD0)
                 self.assertEqual(entry["terminal"], terminal)
                 self.assertEqual(entry["type"], "int32")
-                self.assertEqual(entry["source"], "verified_ce")
+                self.assertEqual(entry["source"], "reversed_disasm")
                 self.assertTrue(entry["verified"])
-                self.assertEqual(entry["steps"], [0x50, 0x08])
+                self.assertEqual(entry["steps"], [])
+                self.assertTrue(entry["deref"])
                 self.proc.read_ptr.reset_mock()
-                self.assertEqual(self.resolver.resolve_entry("player." + axis), self.player_pointer + 0x08 + terminal)
+                self.assertEqual(self.resolver.resolve_entry("player." + axis), self.player_pointer + terminal)
                 self.assertEqual(self.proc.read_ptr.call_args_list, [
                     unittest.mock.call(self.module_base + entry["base_rva"]),
-                    unittest.mock.call(self.player_pointer + 0x50),
                 ])
 
     def test_resolve_empty_steps(self):
@@ -53,13 +53,14 @@ class PositionResolverTests(unittest.TestCase):
             entry = self.resolver.entries["player." + axis]
             # Exercise direct-address support on an in-memory fixture, not the calibrated JSON.
             entry["steps"] = []
+            entry["deref"] = False
             self.assertEqual(entry["steps"], [])
             self.assertEqual(self.resolver.resolve_entry("player." + axis),
                              self.module_base + entry["base_rva"] + entry["terminal"])
         self.proc.read_ptr.assert_not_called()
 
     def test_z_mask(self):
-        address = self.player_pointer + 0x08 + 0x30
+        address = self.player_pointer + 0x28
         for raw, expected in ((0x0B220007, 7), (0x0B220008, 8), (0x0B220006, 6)):
             with self.subTest(raw=raw):
                 self.proc.read_value.return_value = raw
@@ -114,10 +115,9 @@ class PositionResolverTests(unittest.TestCase):
         for module_base in (0x140000000, 0x7FF600000000):
             self.proc.modules["pokealliance_dx.exe"]["base"] = module_base
             self.proc.read_ptr.reset_mock()
-            self.assertEqual(self.resolver.resolve_entry("player.y"), self.player_pointer + 0x08 + 0x2C)
+            self.assertEqual(self.resolver.resolve_entry("player.y"), self.player_pointer + 0x24)
             self.assertEqual(self.proc.read_ptr.call_args_list, [
-                unittest.mock.call(module_base + 0x3904CA8),
-                unittest.mock.call(self.player_pointer + 0x50),
+                unittest.mock.call(module_base + 0x38FADD0),
             ])
 
 

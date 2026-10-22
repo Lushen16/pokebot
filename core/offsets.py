@@ -68,6 +68,9 @@ ALLOWED_ENTRY_KEYS = frozenset(
         "note",
         "source",
         "description",
+        "signature",
+        "signature_disp",
+        "signature_length",
     }
 )
 
@@ -94,11 +97,15 @@ class OffsetEntry:
     mask: Optional[int] = None
     shift: Optional[int] = None
     description: Optional[str] = None
+    signature: Optional[str] = None
+    signature_disp: Optional[int] = None
+    signature_length: Optional[int] = None
 
     @property
     def is_resolved(self) -> bool:
-        """Indica se os ponteiros estão definidos e verificados para leitura."""
-        return self.verified and self.base_rva is not None and self.terminal is not None
+        """Indica se a base (RVA ou assinatura) e o terminal estão definidos."""
+        has_base = self.base_rva is not None or self.signature is not None
+        return self.verified and has_base and self.terminal is not None
 
     def to_reader_dict(self) -> Dict[str, Any]:
         """
@@ -114,6 +121,9 @@ class OffsetEntry:
             "mask": self.mask,
             "shift": self.shift,
             "verified": self.verified,
+            "signature": self.signature,
+            "signature_disp": self.signature_disp,
+            "signature_length": self.signature_length,
         }
 
     def __repr__(self) -> str:
@@ -295,6 +305,25 @@ def _parse_entry(name: str, raw: Any, *, source: str) -> OffsetEntry:
     note = str(raw.get("note", ""))
     entry_source = str(raw.get("source", "assumed"))
 
+    signature = raw.get("signature")
+    if signature is not None:
+        if not isinstance(signature, str) or not signature.strip():
+            raise OffsetError(f"[{source}] '{name}'.signature deve ser string nao vazia")
+        signature = signature.strip()
+
+    signature_disp = raw.get("signature_disp")
+    if signature_disp is not None and (not isinstance(signature_disp, int) or signature_disp < 0):
+        raise OffsetError(f"[{source}] '{name}'.signature_disp deve ser inteiro >= 0")
+
+    signature_length = raw.get("signature_length")
+    if signature_length is not None and (not isinstance(signature_length, int) or signature_length <= 0):
+        raise OffsetError(f"[{source}] '{name}'.signature_length deve ser inteiro > 0")
+
+    if signature_disp is not None and signature_length is None:
+        raise OffsetError(
+            f"[{source}] '{name}': signature_disp exige signature_length"
+        )
+
     return OffsetEntry(
         name=name,
         base_rva=base_rva,
@@ -309,6 +338,9 @@ def _parse_entry(name: str, raw: Any, *, source: str) -> OffsetEntry:
         mask=mask,
         shift=shift,
         description=raw.get("description"),
+        signature=signature,
+        signature_disp=signature_disp,
+        signature_length=signature_length,
     )
 
 

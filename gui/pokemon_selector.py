@@ -460,7 +460,7 @@ class PokemonHealerSelector(QWidget):
             self.detect_roster()
 
     def _open_process_dialog(self):
-        from gui.dialogs.process_selector import ProcessSelectorDialog
+        from gui.process_selector import ProcessSelectorDialog
         dialog = ProcessSelectorDialog(self)
         if dialog.exec():
             selected = dialog.selected_process

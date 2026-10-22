@@ -60,11 +60,11 @@ zero é válido. Entradas verificadas não podem conter `null`.
 Todos os offsets desconhecidos do arquivo ativo são `null`, inclusive `steps`.
 Os tipos herdados são **ASSUMPTION**, sem calibração.
 
-`offsets.legacy.json` preserva os valores anteriores para consulta, com anotações AOB adicionadas.
+`docs/legacy/offsets.legacy.json` preserva os valores anteriores para consulta, com anotações AOB adicionadas.
 Strings, ponteiros como valores finais e campos de bits ficam somente nesse
 arquivo: não possuem representação nos oito tipos escalares solicitados.
 Flags anteriormente `bool` usam `uint8`, ainda como ASSUMPTION.
-Assinaturas anteriores estão em `signatures.json`, todas não verificadas.
+Assinaturas anteriores estão em `docs/legacy/signatures.json`, todas não verificadas.
 O scanner é uma ferramenta de investigação: encontrar uma assinatura não altera
 `verified` nem confirma sua associação ao campo.
 

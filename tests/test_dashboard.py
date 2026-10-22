@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -45,10 +46,118 @@ def wait_for(app, predicate):
     assert predicate()
 
 
+@pytest.mark.parametrize("width", [1200, 1440, 1920])
+def test_targeting_panels_fit_viewport_with_theme(dashboard, width):
+    app, window = dashboard
+    previous_style = app.styleSheet()
+    previous_palette = app.palette()
+    try:
+        gui.apply_dark_theme(app)
+        window.tabs.setCurrentWidget(window.tab_targeting.parentWidget().parentWidget())
+        window.show()
+        window.resize(1920, 800)
+        for _ in range(5):
+            app.processEvents()
+        window.resize(width, 800)
+        for _ in range(5):
+            app.processEvents()
+        page = window.tab_targeting
+        scroll = page.parentWidget().parentWidget()
+        assert page.width() <= scroll.viewport().width()
+        panels = page.findChildren(gui.QFrame, "panelCard")
+        assert len(panels) == 3
+        assert page._column_count == (3 if width == 1920 else 2)
+        for panel in panels:
+            assert panel.geometry().left() >= 0
+            assert panel.mapTo(page, panel.rect().bottomRight()).x() < page.width()
+            assert panel.width() >= panel.minimumSizeHint().width()
+    finally:
+        app.setStyleSheet(previous_style)
+        app.setPalette(previous_palette)
+
+
 def fake_resolver():
     values = {"player.hp": 205, "player.hp_max": 205, "player.x": 3312, "player.y": 2051, "player.z": 7}
     return SimpleNamespace(read_entry=Mock(side_effect=values.get), last_error=None,
                            proc=SimpleNamespace(pid=123, detach=Mock()))
+
+
+def test_settings_applies_and_persists_hotkeys_without_starting_bot(dashboard):
+    import json
+    _, window = dashboard
+    window.global_hotkeys.backend = Mock()
+    bindings = {"pause": "Ctrl+Alt+P", "minimize": "Ctrl+Alt+M", "restore": "Ctrl+Alt+B"}
+    for action, text in bindings.items():
+        window.tab_settings.editors[action].setText(text)
+    window.tab_settings.btn_apply.click()
+    assert window.ctx.get("settings", "hotkeys") == bindings
+    assert json.loads(Path(window.config_path).read_text())["settings"]["hotkeys"] == bindings
+    assert window.worker is None
+    assert window.engine is None
+    assert "salvos" in window.tab_settings.status.text()
+    window.tab_settings.editors["restore"].setText("Ctrl+Alt+P")
+    window.tab_settings.btn_apply.click()
+    assert "diferente" in window.tab_settings.status.text()
+    assert window.ctx.get("settings", "hotkeys") == bindings
+
+
+def test_settings_restore_minimized_window_without_starting_bot(dashboard):
+    app, window = dashboard
+    window.global_hotkeys.backend = Mock()
+    window._apply_global_hotkeys({"minimize": "Ctrl+Alt+M", "restore": "Ctrl+Alt+B"})
+    window.show()
+    assert window.global_hotkeys.dispatch(0x5041)
+    app.processEvents()
+    assert window.isMinimized()
+    assert window.global_hotkeys.dispatch(0x5042)
+    app.processEvents()
+    assert window.isVisible() and not window.isMinimized()
+    assert window.worker is None and window.engine is None
+
+
+def test_pause_hotkey_controls_standalone_walker_and_does_nothing_when_idle(dashboard):
+    _, window = dashboard
+    window._on_pause()
+    assert not window.ctx.is_paused()
+    original = window.tab_cavebot.walker
+    walker = Mock(is_running=True, recording=False)
+    window.tab_cavebot.walker = walker
+    try:
+        window._on_pause()
+        assert window.ctx.is_paused()
+        walker.set_user_paused.assert_called_with(True)
+        assert window.btn_pause.isEnabled()
+        window._on_pause()
+        assert not window.ctx.is_paused()
+        walker.set_user_paused.assert_called_with(False)
+        assert window.engine is None and window.worker is None
+    finally:
+        window.tab_cavebot.walker = original
+
+
+@pytest.mark.parametrize("as_void_pointer", [False, True])
+def test_native_hotkey_message_dispatch_and_capture_do_not_trigger_bot(dashboard, as_void_pointer):
+    import ctypes
+    from ctypes import wintypes
+    from shiboken6 import VoidPtr
+    _, window = dashboard
+    window.global_hotkeys.backend = Mock()
+    callback = Mock()
+    window.global_hotkeys.callbacks["pause"] = callback
+    window._apply_global_hotkeys({"pause": "Ctrl+Alt+P"})
+    message = wintypes.MSG()
+    message.message = gui.WM_HOTKEY
+    message.wParam = 0x5040
+    pointer = VoidPtr(ctypes.addressof(message), 0) if as_void_pointer else ctypes.addressof(message)
+    assert window.nativeEvent(b"windows_generic_MSG", pointer) == (True, 0)
+    callback.assert_called_once_with()
+    editor = window.tab_settings.editors["restore"]
+    editor._start_capture()
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(window, "focusWidget", lambda: editor)
+        window.nativeEvent(b"windows_generic_MSG", pointer)
+    assert editor.value() == "Ctrl+Alt+P"
+    callback.assert_called_once_with()
 
 
 def test_dashboard_is_only_visible_process_selector_and_starts_off(dashboard):
@@ -312,9 +421,10 @@ def test_combat_advanced_is_collapsed_and_preserves_controls(dashboard):
     assert selector.advanced.content.isHidden()
 
 
-def test_dashboard_route_controls_and_recent_log_limit(dashboard):
+def test_route_controls_live_only_in_route_tab_and_recent_log_limit(dashboard):
     _, window = dashboard
-    assert window.tab_dashboard.isAncestorOf(window.tab_cavebot.btn_start_route)
+    assert window.tab_cavebot.control_group.isAncestorOf(window.tab_cavebot.btn_start_route)
+    assert not window.tab_dashboard.isAncestorOf(window.tab_cavebot.btn_start_route)
     assert window.header.isAncestorOf(window.btn_toggle_bot)
     for index in range(8):
         window._log("INFO", f"Evento {index} <teste>")
@@ -392,3 +502,136 @@ def test_tabs_actions_and_glow_follow_master_state(dashboard):
     assert window.btn_toggle_bot.graphicsEffect() is effect
     window.worker = None
     window.resolver = None
+
+
+
+def test_memory_connection_passes_configured_movement_keys_to_walker(dashboard, monkeypatch):
+    import inputbus
+    _, window = dashboard
+    window.ctx.set({"north": "Up", "south": "Down", "east": "Right", "west": "Left"},
+                   "cavebot", "walk_keys")
+    monkeypatch.setattr(inputbus, "get_bus", lambda: Mock())
+    window._memory_connected(fake_resolver())
+    assert window.tab_cavebot.walker.movement_keys == {
+        "north": 0x26, "south": 0x28, "east": 0x27, "west": 0x25}
+
+def test_final_tabs_and_alert_controls(dashboard):
+    _, window = dashboard
+    labels = [window.tabs.tabText(index) for index in range(window.tabs.count())]
+    assert labels == ["DASHBOARD", "TARGETING", "HEALER", "WALKER", "ALERTAS", "SETTINGS"]
+    assert window.tab_healer.isAncestorOf(window.pokemon_healer_selector)
+    assert window.tab_targeting.isAncestorOf(window.chk_focus_shiny)
+    assert window.chk_focus_shiny.text() == "Só atacar shiny (estrela/boss)"
+    assert window.chk_focus_shiny.isChecked()
+    assert window.tab_alert.isAncestorOf(window.chk_chat_player)
+    assert window.tab_alert.isAncestorOf(window.chk_chat_gm)
+    assert window.tab_alert.isAncestorOf(window.txt_chat_log)
+
+
+def test_redesign_keeps_all_interface_controls(dashboard):
+    _, window = dashboard
+    expected = (
+        (window.tab_dashboard, window,
+         ("live_panel", "log_view", "lbl_dash_status", "lbl_route_state",
+          "chk_healer_enabled")),
+        (window.tab_cavebot, window.tab_cavebot,
+         ("table_waypoints", "btn_record", "chk_loop", "combo_profiles",
+          "btn_add_wp", "btn_add_current", "spin_x", "spin_y", "spin_z",
+          "spin_arrival_tolerance", "btn_start_route", "btn_start_nearest",
+          "btn_stop_route")),
+        (window.tab_targeting, window,
+         ("chk_focus_shiny", "spin_attack_range", "edit_attack_hotkey",
+          "spin_attack_cd", "combo_prioritize", "chk_chase", "chk_auto_target",
+          "spin_combat_resume", "chk_perfect_lure", "spin_min_lure",
+          "spin_lure_radius_sqm", "spin_emergency_hp", "spin_max_lure_wait",
+          "spin_group_stable", "edit_combo_hotkey", "edit_combo_command",
+          "spin_combo_wait", "edit_revive_hotkey", "spin_revive_delay",
+          "spin_combat_loops", "chk_post_revive", "list_whitelist",
+          "list_blacklist", "edit_new_target", "btn_add_target",
+          "edit_target_filter", "slider_emergency_hp")),
+        (window.tab_healer, window,
+         ("pokemon_healer_selector",)),
+        (window.tab_alert, window,
+         ("chk_chat_player", "chk_chat_gm", "chk_chat_ignore_self",
+          "chk_chat_include_trade", "spin_chat_poll", "edit_gm_patterns",
+          "chk_chat_beep", "chk_chat_webhook", "chk_alarm_death",
+          "chk_alarm_disconnect", "chk_alarm_gm", "lbl_chat_status",
+          "txt_chat_log")),
+    )
+    for tab, owner, names in expected:
+        for name in names:
+            widget = getattr(owner, name)
+            assert tab.isAncestorOf(widget), f"{name} saiu da aba {tab.objectName() or tab}"
+    assert not hasattr(window, "stat_labels")
+    assert window.tab_dashboard.isAncestorOf(window.live_panel)
+    assert window.tab_dashboard.isAncestorOf(window.log_view)
+    assert window.header.isAncestorOf(window.status_dot)
+    assert window.header.isAncestorOf(window.btn_pause)
+    assert window.header.isAncestorOf(window.combo_header_profile)
+    assert not window.tab_dashboard.isAncestorOf(window.tab_cavebot.btn_start_route)
+    assert window.tab_cavebot.control_group.isAncestorOf(window.tab_cavebot.btn_start_route)
+
+
+def test_target_panel_adds_and_filters_whitelist(dashboard):
+    _, window = dashboard
+    window.edit_new_target.setText("Pikachu")
+    window._add_target_from_field()
+    assert window.ctx.get("auto_target", "name_whitelist") == ["Pikachu"]
+    assert window.list_whitelist.count() == 1
+    window.edit_target_filter.setText("pika")
+    assert not window.list_whitelist.item(0).isHidden()
+    window.edit_target_filter.setText("zzz")
+    assert window.list_whitelist.item(0).isHidden()
+
+
+def test_emergency_hp_slider_mirrors_spin_and_config(dashboard):
+    _, window = dashboard
+    window.spin_emergency_hp.setValue(55)
+    assert window.slider_emergency_hp.value() == 55
+    window.slider_emergency_hp.setValue(25)
+    assert window.spin_emergency_hp.value() == 25
+    assert window.ctx.get("auto_target", "emergency_hp_percent") == 25
+
+
+def test_header_profile_combo_mirrors_saved_hunts(dashboard):
+    _, window = dashboard
+    names = window.tab_cavebot.profile_manager.list_profiles()
+    assert window.combo_header_profile.count() == len(names) + 1
+
+
+def test_revive_delay_field_does_not_clamp_configured_value(dashboard):
+    _, window = dashboard
+    window.spin_revive_delay.setValue(1100)
+    assert window.spin_revive_delay.value() == 1100
+    assert window.ctx.get("auto_target", "revive_delay_ms") == 1100
+
+
+def test_alert_config_save_updates_patterns_and_beeps(dashboard):
+    _, window = dashboard
+    window.chk_chat_player.setChecked(False)
+    window.chk_chat_gm.setChecked(True)
+    window.chk_chat_beep.setChecked(False)
+    window.chk_alarm_death.setChecked(True)
+    window.chk_alarm_disconnect.setChecked(False)
+    window.chk_alarm_gm.setChecked(True)
+    window.edit_gm_patterns.setText("GM, Gamemaster")
+    window._save_alert_config()
+    assert window.ctx.get("alarms", "chat_player_enabled") is False
+    assert window.ctx.get("alarms", "chat_gm_enabled") is True
+    assert window.ctx.get("alarms", "chat_beep") is False
+    assert window.ctx.get("alarms", "gm_name_patterns") == ["GM", "Gamemaster"]
+    assert window.ctx.get("alarms", "beep_on") == ["death", "gm_detected"]
+
+
+def test_chat_panel_shows_status_and_recent_messages(dashboard):
+    _, window = dashboard
+    window.engine = SimpleNamespace(modules={"alarms": SimpleNamespace(
+        chat_status={"connected": True, "tick": 123, "events": 2, "dropped": 1},
+        recent_chat=[{"time": "12:00:00", "gm": False, "name": "Player", "text": "oi"}],
+    )})
+    window._refresh_chat_panel()
+    assert "tick 123" in window.lbl_chat_status.text()
+    assert "JOGADOR" in window.txt_chat_log.toPlainText()
+    assert "oi" in window.txt_chat_log.toPlainText()
+    window.engine = None
+
